@@ -7,11 +7,10 @@ import Ridgeline from "../components/Ridgeline"
 
 const FOCUS = "mussoorie"
 
-function DestinationCard({ c, featured }) {
+function DestinationCard({ c }) {
   return (
-    <Link to={`/d/${c.slug}`}
-      className={`group block rounded-2xl border border-line bg-surface p-6 hover:border-line-strong ${featured ? "sm:col-span-2" : ""}`}>
-      <p className="text-sm font-semibold text-highlight">{featured ? "Focus destination" : "Destination"}</p>
+    <Link to={`/d/${c.slug}`} className="group block rounded-2xl border border-line bg-surface p-6 hover:border-line-strong">
+      <p className="text-sm font-semibold text-highlight">Hotels and homestays</p>
       <p className="mt-1 font-display text-2xl font-extrabold tracking-tight">{c.name}</p>
       <p className="mt-2 text-sm text-muted tabular">
         {c.properties} properties · {c.reviews.toLocaleString()} reviews · {monthLabel(c.from)} to {monthLabel(c.to)}
@@ -26,7 +25,6 @@ function DestinationCard({ c, featured }) {
 export default function Home() {
   const { data, error, loading } = useFetch(() => api.clusters(), "clusters")
   const focus = data?.find((c) => c.slug === FOCUS)
-  const others = data?.filter((c) => c.slug !== FOCUS) ?? []
   return (
     <>
       <section className="relative overflow-hidden">
@@ -42,36 +40,24 @@ export default function Home() {
           <div className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-3">
             {focus
               ? <Link to={`/d/${FOCUS}`} className="inline-flex items-center gap-2 min-h-11 px-5 rounded-xl bg-accent text-on-accent font-semibold">Open Mussoorie <ArrowRight size={16} aria-hidden="true" /></Link>
-              : <a href="#destinations" className="inline-flex items-center gap-2 min-h-11 px-5 rounded-xl bg-accent text-on-accent font-semibold">See destinations <ArrowRight size={16} aria-hidden="true" /></a>}
-            <Link to="/method" className="font-semibold text-accent underline underline-offset-4">How it works</Link>
+              : <Link to="/method" className="inline-flex items-center gap-2 min-h-11 px-5 rounded-xl bg-accent text-on-accent font-semibold">How it works <ArrowRight size={16} aria-hidden="true" /></Link>}
+            {focus && <Link to="/method" className="font-semibold text-accent underline underline-offset-4">How it works</Link>}
           </div>
         </div>
         <Ridgeline className="absolute bottom-0 inset-x-0 w-full h-28 sm:h-36" />
       </section>
 
-      <section id="destinations" aria-labelledby="dest-h" className="max-w-6xl mx-auto px-4 sm:px-6 py-16">
-        <h2 id="dest-h" className="font-display text-3xl font-extrabold tracking-tight">Destinations</h2>
+      <section aria-labelledby="dest-h" className="max-w-6xl mx-auto px-4 sm:px-6 py-16">
+        <h2 id="dest-h" className="font-display text-3xl font-extrabold tracking-tight">Mussoorie</h2>
         <div className="mt-6" aria-live="polite" aria-busy={loading}>
-          {loading && <p className="text-muted">Loading destinations…</p>}
+          {loading && <p className="text-muted">Loading…</p>}
           {error && <p role="alert" className="text-danger">Couldn&rsquo;t reach the API: {error.message}</p>}
-          {data && (
-            <>
-              {!focus && (
-                <p className="mb-6 rounded-xl border border-line bg-surface p-4 text-sm">
-                  <strong>Mussoorie&rsquo;s 2025&ndash;26 reviews are being collected.</strong>{" "}
-                  <span className="text-muted">Until they&rsquo;re in, the destinations below show the method on other markets.</span>
-                </p>
-              )}
-              {data.length === 0
-                ? <p className="text-muted">No destinations built yet.</p>
-                : (
-                  <ul className="grid gap-4 sm:grid-cols-2">
-                    {focus && <li className="sm:col-span-2"><DestinationCard c={focus} featured /></li>}
-                    {others.map((c) => <li key={c.slug}><DestinationCard c={c} /></li>)}
-                  </ul>
-                )}
-            </>
-          )}
+          {data && (focus ? <DestinationCard c={focus} /> : (
+            <p className="rounded-xl border border-line bg-surface p-5">
+              <strong>Mussoorie&rsquo;s 2025&ndash;26 reviews are being collected.</strong>{" "}
+              <span className="text-muted">The analysis appears here as soon as they&rsquo;re in.</span>
+            </p>
+          ))}
         </div>
       </section>
     </>

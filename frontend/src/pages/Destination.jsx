@@ -113,9 +113,9 @@ export default function Destination() {
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
-      <p className="text-sm font-semibold"><Link to="/" className="text-accent underline underline-offset-4">Destinations</Link></p>
+      <p className="text-sm font-semibold"><Link to="/" className="text-accent underline underline-offset-4">Home</Link></p>
       {loading && <p className="mt-8 text-muted" aria-live="polite">Reading the reviews…</p>}
-      {error && <p role="alert" className="mt-8 text-danger">{error.status === 404 ? "No such destination." : `Couldn’t load it: ${error.message}`}</p>}
+      {error && <p role="alert" className="mt-8 text-danger">{error.status === 404 ? "No reviews for this destination yet." : `Couldn’t load it: ${error.message}`}</p>}
       {data && (
         <>
           <div className="mt-3 flex flex-wrap items-end justify-between gap-4">

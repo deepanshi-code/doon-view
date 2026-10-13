@@ -34,7 +34,7 @@ export default function Shell() {
             <Mark /> <span className="max-sm:sr-only">Destination Lens</span>
           </Link>
           <nav aria-label="Main" className="flex items-center gap-1">
-            <NavLink to="/" end className={navClass}>Destinations</NavLink>
+            <NavLink to="/" end className={navClass}>Mussoorie</NavLink>
             <NavLink to="/method" className={navClass}>Method</NavLink>
             <ThemeToggle />
           </nav>
