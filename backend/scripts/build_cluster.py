@@ -143,6 +143,7 @@ def main() -> None:
     p.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL)
     p.add_argument("--out", type=Path, default=BACKEND / "clusters")
     p.add_argument("--check", action="store_true", help="report on the data and stop: no labelling, nothing written")
+    p.add_argument("--demo", action="store_true", help="synthetic data (scripts/make_demo_data.py): every view says so")
     p.add_argument("--since", default="2025-01", help="--check: the period the app shows by default (YYYY-MM)")
     args = p.parse_args()
 
@@ -153,10 +154,10 @@ def main() -> None:
         raise SystemExit("--opinrank needs --city")
 
     rows = read_opinrank(args.opinrank, args.city) if args.opinrank else read_csv(args.csv)
-    # The same review copied from two platforms (or twice from one) counts once
+    # The same review copied from two platforms (or twice from one) counts once: same property, date and text
     seen, unique = set(), []
     for r in rows:
-        key = (r["property"].lower(), " ".join(r["text"].lower().split()))
+        key = (r["property"].lower(), to_month(r["date"]) or r["date"], " ".join(r["text"].lower().split()))
         if key not in seen:
             seen.add(key)
             unique.append(r)
@@ -195,7 +196,9 @@ def main() -> None:
 
     undated = sum(r["month"] is None for r in out_reviews)
     sources = Counter(r["source"] for r in out_reviews)
-    cluster = {"slug": args.slug, "name": args.name, "kind": args.kind, "source": args.source,
+    if args.demo and not args.source:
+        args.source = "Synthetic demo data: generated reviews of fictional properties (scripts/make_demo_data.py)."
+    cluster = {"slug": args.slug, "name": args.name, "kind": args.kind, "source": args.source, "demo": args.demo,
                "built": datetime.now().strftime("%Y-%m-%d"), "label_sources": dict(sources),
                "properties": {slugify(n): n for n in sorted(kept)}, "reviews": out_reviews}
     args.out.mkdir(parents=True, exist_ok=True)

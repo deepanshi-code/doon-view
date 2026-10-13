@@ -5,6 +5,7 @@ import { api } from "../api"
 import { PERIODS, headline, monthLabel, pct } from "../format"
 import { useFetch } from "../useFetch"
 import { RangeBar, Spark } from "../components/Charts"
+import DemoNotice from "../components/DemoNotice"
 
 // Reading order: 1. headline finding, 2. what visitors say per aspect (with how sure we are), 3. one property
 // against the rest of its market.
@@ -128,6 +129,7 @@ export default function Destination() {
             </div>
             <PeriodSwitch period={period} onChange={setPeriod} />
           </div>
+          {data.demo && <div className="mt-6"><DemoNotice /></div>}
 
           {data.reviews === 0 ? (
             <p className="mt-10 rounded-2xl border border-line bg-surface p-6">

@@ -90,6 +90,19 @@ def test_recent_reviews_by_default_and_any_window_on_request(cluster_dir):
     assert client.get("/api/clusters/town?until=last-year").status_code == 422
 
 
+def test_demo_data_is_flagged_in_every_view(cluster_dir):
+    path = cluster_dir / "town.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "demo": True}))
+    C._load.cache_clear()
+    assert client.get("/api/clusters").json()[0]["demo"] is True
+    assert client.get("/api/clusters/town").json()["demo"] is True
+    assert client.get("/api/clusters/town/properties/good").json()["demo"] is True
+
+
+def test_real_data_is_not_flagged(cluster_dir):
+    assert client.get("/api/clusters/town").json()["demo"] is False
+
+
 def test_endpoints(cluster_dir):
     listed = client.get("/api/clusters").json()
     assert [c["slug"] for c in listed] == ["town"] and listed[0]["properties"] == 4

@@ -104,6 +104,7 @@ class Cluster:
     source: str
     properties: dict     # property_id -> display name
     reviews: tuple
+    demo: bool = False   # synthetic data (scripts/make_demo_data.py): every view must say so
 
 
 def cluster_dir() -> Path:
@@ -117,7 +118,7 @@ def list_clusters() -> list[dict]:
         if SLUG.match(path.stem):
             c = load_cluster(path.stem)
             if c:
-                out.append({"slug": c.slug, "name": c.name, "kind": c.kind, "source": c.source,
+                out.append({"slug": c.slug, "name": c.name, "kind": c.kind, "source": c.source, "demo": c.demo,
                             "properties": len(c.properties), "reviews": len(c.reviews), **_period(c.reviews)})
     return out
 
@@ -139,7 +140,7 @@ def _load(path: str, mtime: float) -> Cluster:  # mtime in the key: a rebuilt fi
                r.get("confidence"))
         for r in data["reviews"] if not r.get("is_spam"))
     return Cluster(data["slug"], data["name"], data.get("kind", "hotels"), data.get("source", ""),
-                   data["properties"], reviews)
+                   data["properties"], reviews, bool(data.get("demo")))
 
 
 MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -317,7 +318,7 @@ def destination_view(c: Cluster) -> dict:
     for r in c.reviews:
         sentiment[r.sentiment] += 1
     return {
-        "slug": c.slug, "name": c.name, "kind": c.kind, "source": c.source, **_period(c.reviews),
+        "slug": c.slug, "name": c.name, "kind": c.kind, "source": c.source, "demo": c.demo, **_period(c.reviews),
         "reviews": len(c.reviews), "sentiment": dict(sentiment),
         "trend_note": ("Destination trends mix every property: a change can come from which places were reviewed, "
                        "not only from how visits went. Check a property's own trend before acting on one."),
@@ -364,6 +365,6 @@ def benchmark(c: Cluster, property_id: str) -> dict | None:
     for row in rows:
         row["complaint_quotes"] = (_quotes(mine, row["aspect"], "negative", used)
                                    if row["verdict"] in ("lags", "in_line") else [])
-    return {"cluster": c.slug, "cluster_name": c.name, "property": {"id": property_id,
+    return {"cluster": c.slug, "cluster_name": c.name, "demo": c.demo, "property": {"id": property_id,
             "name": c.properties.get(property_id, property_id), "reviews": len(mine)},
             "competitors": len(groups) - 1, "aspects": rows}

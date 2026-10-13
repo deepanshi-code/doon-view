@@ -9,3 +9,7 @@ venv/
 backend/clusters/
 backend/model/
 .pytest_cache/
+
+# Collected or generated review data stays out of git; the template is the format
+data/*.csv
+!data/reviews.template.csv

@@ -4,13 +4,17 @@ import { api } from "../api"
 import { monthLabel } from "../format"
 import { useFetch } from "../useFetch"
 import Ridgeline from "../components/Ridgeline"
+import DemoNotice from "../components/DemoNotice"
 
 const FOCUS = "mussoorie"
 
 function DestinationCard({ c }) {
   return (
     <Link to={`/d/${c.slug}`} className="group block rounded-2xl border border-line bg-surface p-6 hover:border-line-strong">
-      <p className="text-sm font-semibold text-highlight">Hotels and homestays</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm font-semibold text-highlight">Hotels and homestays</p>
+        {c.demo && <DemoNotice compact />}
+      </div>
       <p className="mt-1 font-display text-2xl font-extrabold tracking-tight">{c.name}</p>
       <p className="mt-2 text-sm text-muted tabular">
         {c.properties} properties · {c.reviews.toLocaleString()} reviews · {monthLabel(c.from)} to {monthLabel(c.to)}
