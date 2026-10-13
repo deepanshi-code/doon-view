@@ -1,0 +1,74 @@
+@import "tailwindcss";
+@import "@fontsource-variable/bricolage-grotesque";
+@import "@fontsource-variable/hanken-grotesk";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Ridgeline: slate + a saffron signature, split-complementary with slate-teal. Contrast is computed by script
+   (.claude/design/gen_themes.py): every text pair >= 4.5:1 and UI pair >= 3:1 in both modes. */
+:root {
+  --bg: #f4f2ef;
+  --surface: #ffffff;
+  --ink: #1b1e2b;
+  --muted: #565b6e;
+  --accent: #b93c0b;
+  --on-accent: #ffffff;
+  --highlight: #0d6166;
+  --danger: #b42318;
+  --success: #1f7a4d;
+  --border: #dcd8d2;
+  --border-strong: #858a99;
+  --focus: #b93c0b;
+  --band: #b93c0b2e;
+  --ridge-1: #b93c0b;
+  --ridge-2: #0d6166;
+  color-scheme: light;
+}
+.dark {
+  --bg: #12131c;
+  --surface: #1b1d29;
+  --ink: #f1efea;
+  --muted: #a9adbd;
+  --accent: #fb923c;
+  --on-accent: #12131c;
+  --highlight: #5ec4c9;
+  --danger: #ff8a7a;
+  --success: #6fd39c;
+  --border: #2c2f40;
+  --border-strong: #707690;
+  --focus: #fb923c;
+  --band: #fb923c40;
+  --ridge-1: #fb923c;
+  --ridge-2: #5ec4c9;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-highlight: var(--highlight);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-focus: var(--focus);
+  --color-band: var(--band);
+  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, sans-serif;
+  --font-body: "Hanken Grotesk Variable", ui-sans-serif, sans-serif;
+}
+
+html {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+body { min-height: 100dvh; }
+
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+.tabular { font-variant-numeric: tabular-nums; }
