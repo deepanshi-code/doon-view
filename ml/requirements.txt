@@ -1,0 +1,18 @@
+# Training and evaluation. On the B200, train_b200.sh installs the CUDA build of torch first and pins it.
+torch>=2.4
+transformers>=4.45
+accelerate>=1.0          # hf teacher fallback: load the LLM straight onto the GPU
+huggingface_hub>=0.24    # current-model download and private backup
+scikit-learn>=1.5
+pandas>=2.2
+pyarrow>=16
+numpy>=1.26
+requests>=2.31
+python-dotenv>=1.0       # backend/app reads .env on import
+sentencepiece>=0.2       # DeBERTa-v3 tokenizer
+tokenizers>=0.20
+onnx>=1.16
+onnxruntime>=1.19
+pytest>=8.0
+# vLLM is NOT listed on purpose: train_b200.sh installs it in a separate .venv-teacher, because it brings its own
+# torch build, which can replace the one this driver needs.

@@ -23,7 +23,8 @@ from functools import lru_cache
 from pathlib import Path
 
 ASPECT_NAMES = {"cleanliness": "Cleanliness", "location": "Location", "wifi": "WiFi", "host": "Host & staff",
-                "value": "Value for money", "amenities": "Amenities & room", "food": "Food"}
+                "value": "Value for money", "amenities": "Amenities & room", "food": "Food",
+                "booking": "Booking & check-in"}
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 Z95 = 1.959964
 CHI2_1DF_1PCT = 6.635
@@ -181,6 +182,7 @@ KEYWORDS = {
     "value": r"price|value|money|expensive|cheap|overpriced|cost|charge|worth",
     "amenities": r"room|bed|ac\b|air.?con|heater|heating|hot water|shower|pool|gym|lift|tv",
     "food": r"food|breakfast|dinner|lunch|restaurant|meal|buffet|tea|coffee|menu",
+    "booking": r"book|booking|reservation|check.?in|check.?out|refund|deposit|makemytrip|mmt|agoda|charged|extra",
 }
 
 

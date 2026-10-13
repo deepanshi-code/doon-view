@@ -55,6 +55,21 @@ python -m scripts.build_cluster --csv ../data/mussoorie.csv --slug mussoorie --n
 without labelling anything. Collect reviews by hand or through official APIs within their terms; don't scrape sites
 whose terms forbid it.
 
+## Train the model on the Mussoorie reviews (B200)
+
+`ml/` fine-tunes the classifier on the collected Mussoorie reviews only (`data/reviews.csv`, see
+`data/DATA_CHANGELOG.md`). Sentiment comes from the guests' stars; aspects (including booking) from an open LLM
+teacher run once on the GPU. Every candidate is scored by 5-fold cross-validation on the same 1,657 reviews, with
+95% bootstrap intervals, against TF-IDF, keyword rules and the current app model.
+
+```bash
+mkdir -p /workspace/doonview && cd /workspace/doonview && python3 -m zipfile -e doon-view-train.zip .
+export HF_TOKEN=<write token>   # optional: current-model comparison and private backup
+bash ml/train_b200.sh
+```
+
+The result is `ml/artifacts/doon-view-deberta-v3-xsmall.zip`, which the app loads through `MODEL_DIR` or `MODEL_URL`.
+
 ## Tests
 
 ```bash

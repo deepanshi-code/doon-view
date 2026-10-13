@@ -1,0 +1,5 @@
+.venv/
+.venv-teacher/
+runs/
+artifacts/
+data/

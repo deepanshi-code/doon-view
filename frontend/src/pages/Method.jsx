@@ -16,7 +16,7 @@ const ASPECTS = [
   ["Location", "Location", "Surroundings, views, access roads, parking, distance, outside noise"],
   ["Value for money", "Value for money", "Price against what was received, only when the guest links the two"],
   ["(extra)", "WiFi", "Connectivity and mobile signal: a frequent hill-station complaint"],
-  ["Booking experience", "not yet", "Needs labelled examples; on the roadmap"],
+  ["Booking experience", "Booking & check-in", "Reservation honoured, price as shown, check-in and check-out, refunds (models trained on Mussoorie reviews)"],
 ]
 
 const RULES = [
