@@ -1,4 +1,4 @@
-"""Destination Lens API: read-only views over cluster files (scripts/build_cluster.py).
+"""Doon View API: read-only views over cluster files (scripts/build_cluster.py).
 
 No accounts and no database: a cluster file holds aggregated, labelled reviews with reviewer names removed.
 """
@@ -22,7 +22,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="Destination Lens API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Doon View API", version="1.0.0", lifespan=lifespan)
 
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=False, allow_methods=["GET"],
@@ -31,7 +31,7 @@ app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credenti
 
 @app.get("/api/status")
 def get_status():
-    return {"app": "Destination Lens", "clusters": len(cluster.list_clusters()), **labelling.status()}
+    return {"app": "Doon View", "clusters": len(cluster.list_clusters()), **labelling.status()}
 
 
 @app.get("/api/clusters")

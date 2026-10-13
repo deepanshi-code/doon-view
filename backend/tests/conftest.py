@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 # Before any `app` import: modules read config at import time
-os.environ.update({"GEMINI_API_KEY": "", "ALLOWED_ORIGINS": "https://destination-lens.example"})
+os.environ.update({"GEMINI_API_KEY": "", "ALLOWED_ORIGINS": "https://doon-view.example"})
 os.environ.pop("MODEL_DIR", None)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

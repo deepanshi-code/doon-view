@@ -31,7 +31,7 @@ export default function Shell() {
       <header className="border-b border-line">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <Link to="/" className="flex items-center gap-2.5 font-display font-extrabold text-lg tracking-tight text-ink">
-            <Mark /> <span className="max-sm:sr-only">Destination Lens</span>
+            <Mark /> <span className="max-sm:sr-only">Doon View</span>
           </Link>
           <nav aria-label="Main" className="flex items-center gap-1">
             <NavLink to="/" end className={navClass}>Mussoorie</NavLink>
@@ -43,7 +43,7 @@ export default function Shell() {
       <main id="main" className="flex-1"><Outlet /></main>
       <footer className="border-t border-line">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 text-sm text-muted flex flex-col sm:flex-row gap-2 justify-between">
-          <p>Destination Lens: review intelligence for Uttarakhand&rsquo;s hill towns. Built for the AI&ndash;Tourism Hackathon.</p>
+          <p>Doon View: review intelligence for Mussoorie&rsquo;s hotels. Built for the AI&ndash;Tourism Hackathon.</p>
           <p>Aggregates and short quotes only; reviewer names removed.</p>
         </div>
       </footer>
