@@ -65,6 +65,15 @@ def get_destination(slug: str, since: str | None = Query(None, pattern=f"{MONTH}
     return {**cluster.destination_view(c), "window": win}
 
 
+@app.get("/api/clusters/{slug}/grid")
+def get_grid(slug: str, since: str | None = Query(None, pattern=f"{MONTH}|^$"),
+             until: str | None = Query(None, pattern=MONTH)):
+    c, win = _windowed(slug, since, until)
+    if c is None:
+        raise HTTPException(status_code=404, detail="Destination not found")
+    return {**cluster.market_grid(c), "window": win}
+
+
 @app.get("/api/clusters/{slug}/properties/{property_id}")
 def get_benchmark(slug: str, property_id: str, since: str | None = Query(None, pattern=f"{MONTH}|^$"),
                   until: str | None = Query(None, pattern=MONTH)):

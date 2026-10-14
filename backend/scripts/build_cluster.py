@@ -5,6 +5,8 @@ Usage (from backend/):
   # Your own collected sample: a CSV with columns property, text, date [, platform, rating, reviewer]
   python -m scripts.build_cluster --csv mussoorie.csv --slug mussoorie --name "Mussoorie hotels" \
       --source "Collected 2026-10-13 from public listings, 12 properties" [--kind hotels]
+  # The team's Mussoorie dataset (data/reviews.csv + data/hotels.csv): in-cluster hotels, text reviews only
+  python -m scripts.build_cluster --doonview ../data/reviews.csv --slug mussoorie --name "Mussoorie hotels"
   # The OpinRank research dataset (TripAdvisor reviews, 2001-2009), one city as a stand-in cluster
   python -m scripts.build_cluster --opinrank path/to/opinrank.zip --city new-delhi \
       --slug new-delhi --name "New Delhi hotels"
@@ -100,6 +102,27 @@ def read_opinrank(zip_path: Path, city: str) -> list[dict]:
     return rows
 
 
+def read_doonview(reviews_csv: Path, hotels_csv: Path) -> list[dict]:
+    """The team's collected dataset (data/reviews.csv + data/hotels.csv, see data/DATA_CHANGELOG.md): hotels marked
+    in_cluster = Y, reviews with text and no quality flag; a MakeMyTrip title is part of what the guest wrote."""
+    with hotels_csv.open(encoding="utf-8-sig", newline="") as f:
+        cluster = {h["hotel_id"] for h in csv.DictReader(f) if h["in_cluster"].strip().upper() == "Y"}
+    rows = []
+    with reviews_csv.open(encoding="utf-8-sig", newline="") as f:
+        for r in csv.DictReader(f):
+            text, title = (r["text"] or "").strip(), (r["title"] or "").strip()
+            if (r["hotel_id"] not in cluster or r["quality_flag"].strip() or not text
+                    or r["has_text"].strip().lower() not in ("true", "1", "yes")):
+                continue
+            if title and not text.lower().startswith(title.lower()):
+                text = f"{title.rstrip('.')}. {text}"
+            rows.append({"property": r["canonical_name"], "text": text, "date": r["review_date"][:10],
+                         "platform": r["platform"], "rating": r["rating_5"], "reviewer": ""})
+    if not rows:
+        raise SystemExit(f"no in-cluster text reviews in {reviews_csv}")
+    return rows
+
+
 def check(rows: list[dict], min_reviews: int, since: str) -> None:
     """What the app will be able to say with this data, before spending time on labelling."""
     months = [to_month(r["date"]) for r in rows]
@@ -134,6 +157,8 @@ def main() -> None:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--csv", type=Path)
     src.add_argument("--opinrank", type=Path)
+    src.add_argument("--doonview", type=Path, help="the team's reviews.csv (data/DATA_CHANGELOG.md format)")
+    p.add_argument("--hotels", type=Path, help="--doonview: hotels.csv (default: next to reviews.csv)")
     p.add_argument("--city", help="OpinRank city folder, e.g. new-delhi")
     p.add_argument("--slug", required=True)
     p.add_argument("--name", required=True)
@@ -153,7 +178,12 @@ def main() -> None:
     if args.opinrank and not args.city:
         raise SystemExit("--opinrank needs --city")
 
-    rows = read_opinrank(args.opinrank, args.city) if args.opinrank else read_csv(args.csv)
+    if args.doonview:
+        rows = read_doonview(args.doonview, args.hotels or args.doonview.with_name("hotels.csv"))
+    elif args.opinrank:
+        rows = read_opinrank(args.opinrank, args.city)
+    else:
+        rows = read_csv(args.csv)
     # The same review copied from two platforms (or twice from one) counts once: same property, date and text
     seen, unique = set(), []
     for r in rows:

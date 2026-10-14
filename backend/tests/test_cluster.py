@@ -42,6 +42,48 @@ def cluster_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
+def _rated(pid, aspects, stars, platform="google"):
+    return {**_review(pid, "2025-03", aspects), "rating": str(stars), "platform": platform}
+
+
+def test_star_costs_recover_the_true_effects_and_hold_platform_apart():
+    # Built so stars = 4.8 - 1.5*(wifi complaint) - 0.5*(food complaint), with Booking.com a flat 0.4 lower.
+    # Every combination appears, so the fit must recover 1.5 and 0.5 exactly (and not blame the platform gap on food).
+    reviews = []
+    for i in range(240):
+        wifi, food, booking = i % 2 == 0, i % 3 == 0, i % 5 == 0
+        aspects = {"wifi": "negative" if wifi else "positive", "food": "negative" if food else "positive"}
+        stars = 4.8 - 1.5 * wifi - 0.5 * food - 0.4 * booking
+        reviews.append(_rated("h", aspects, stars, "booking" if booking else "google"))
+    c = C.Cluster("t", "T", "hotels", "", {"h": "H"}, tuple(
+        C.Review(r["property_id"], r["month"], "positive", r["aspects"], "", None, r["platform"], C._rating(r["rating"]))
+        for r in reviews), aspects=("wifi", "food"))
+    costs = C.star_costs(c)
+    assert costs["wifi"]["cost"] == pytest.approx(1.5, abs=1e-6)
+    assert costs["food"]["cost"] == pytest.approx(0.5, abs=1e-6)
+    assert C._rating("4.5") == 4.5 and C._rating("") is None and C._rating("9") is None and C._rating(None) is None
+
+
+def test_impact_ranks_only_aspects_where_the_property_complains_more(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLUSTER_DIR", str(tmp_path))
+    reviews = []
+    for pid, wifi_bad, food_bad in (("worse", 30, 10), ("a", 6, 10), ("b", 6, 10)):
+        for i in range(60):
+            aspects = {"wifi": "negative" if i < wifi_bad else "positive", "food": "negative" if i < food_bad else "positive"}
+            reviews.append(_rated(pid, aspects, 4.8 - 1.0 * (i < wifi_bad) - 0.3 * (i < food_bad) - 0.01 * (i % 7)))
+    (tmp_path / "t.json").write_text(json.dumps({"slug": "t", "name": "T", "source": "unit test",
+                                                 "properties": {"worse": "W", "a": "A", "b": "B"}, "reviews": reviews}))
+    C._load.cache_clear()
+    out = client.get("/api/clusters/t/properties/worse?since=").json()["impact"]
+    assert [r["aspect"] for r in out["aspects"]] == ["wifi"]          # food: no more complaints than the market
+    wifi = out["aspects"][0]
+    gap = 30 / 60 - 6 / 60
+    assert wifi["gain"] == pytest.approx(gap * wifi["stars_per_complaint"], abs=1e-3)
+    assert wifi["stars_per_complaint"] == pytest.approx(1.0, abs=0.02)
+    assert out["rating"] < out["market_rating"]
+    assert client.get("/api/clusters/t/properties/a?since=").json()["impact"]["aspects"] == []
+
+
 def test_wilson_interval():
     assert C.wilson(0, 0) == (0.0, 1.0)
     low, high = C.wilson(8, 10)
@@ -101,6 +143,28 @@ def test_demo_data_is_flagged_in_every_view(cluster_dir):
 
 def test_real_data_is_not_flagged(cluster_dir):
     assert client.get("/api/clusters/town").json()["demo"] is False
+
+
+def test_market_grid_ranks_properties_and_matches_the_benchmark(cluster_dir):
+    grid = client.get("/api/clusters/town/grid").json()
+    names = [p["id"] for p in grid["properties"]]
+    assert names[0] == "good" and names.index("bad") > names.index("mid")   # most led-minus-lagged first
+    assert grid["shared_issues"] == ["location"]
+    good = next(p for p in grid["properties"] if p["id"] == "good")
+    bench = client.get("/api/clusters/town/properties/good").json()
+    assert good["cells"]["food"]["verdict"] == "leads" == next(a for a in bench["aspects"] if a["aspect"] == "food")["verdict"]
+    assert good["sources"] == {} and bench["property"]["sources"] == {}       # the fixture has no platforms
+    assert client.get("/api/clusters/nowhere/grid").status_code == 404
+
+
+def test_only_aspects_the_labeller_covers_are_shown(cluster_dir):
+    """Regression: a model without the booking aspect showed a 0-mention Booking row with a 0-100% range."""
+    shown = lambda body: {a["aspect"] for a in body["aspects"]}  # noqa: E731
+    assert shown(client.get("/api/clusters/town").json()) == {"food", "location"}
+    assert shown(client.get("/api/clusters/town/properties/good").json()) == {"food", "location"}
+    # an empty window keeps the cluster's aspects (with zeros), it doesn't drop them
+    assert shown(client.get("/api/clusters/town?since=2030-01").json()) == {"food", "location"}
+    assert client.get("/api/clusters/town").json()["label_sources"] == {}
 
 
 def test_endpoints(cluster_dir):

@@ -18,7 +18,7 @@ import json
 import math
 import re
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -95,6 +95,8 @@ class Review:
     aspects: dict        # aspect -> "positive" | "negative" (mentioned only)
     text: str
     confidence: float | None
+    platform: str = ""   # google, makemytrip, tripadvisor, booking, agoda: shown as a property's sources
+    rating: float | None = None   # the guest's own overall stars, 1-5 (None when the platform gave none)
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,10 @@ class Cluster:
     properties: dict     # property_id -> display name
     reviews: tuple
     demo: bool = False   # synthetic data (scripts/make_demo_data.py): every view must say so
+    label_sources: dict = field(default_factory=dict)  # "model" | "gemini" | "heuristic" -> reviews labelled by it
+    # Aspects the labeller covers, from the whole file (so a date window keeps them). An aspect no review ever
+    # mentions, e.g. one the model predates, is left out rather than shown as a 0-mention row.
+    aspects: tuple = tuple(ASPECT_NAMES)
 
 
 def cluster_dir() -> Path:
@@ -133,15 +139,25 @@ def load_cluster(slug: str) -> Cluster | None:
     return _load(str(path), path.stat().st_mtime)
 
 
+def _rating(value) -> float | None:
+    """A guest's stars as a number on 1-5, or None for blanks and anything off the scale."""
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    return x if 1 <= x <= 5 else None
+
+
 @lru_cache(maxsize=16)
 def _load(path: str, mtime: float) -> Cluster:  # mtime in the key: a rebuilt file is re-read
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     reviews = tuple(
         Review(r["property_id"], r["month"], r["sentiment"], r.get("aspects") or {}, r.get("text", ""),
-               r.get("confidence"))
+               r.get("confidence"), r.get("platform") or "", _rating(r.get("rating")))
         for r in data["reviews"] if not r.get("is_spam"))
     return Cluster(data["slug"], data["name"], data.get("kind", "hotels"), data.get("source", ""),
-                   data["properties"], reviews, bool(data.get("demo")))
+                   data["properties"], reviews, bool(data.get("demo")), dict(data.get("label_sources") or {}),
+                   tuple(a for a in ASPECT_NAMES if any(a in r.aspects for r in reviews)) or tuple(ASPECT_NAMES))
 
 
 MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -297,6 +313,8 @@ def destination_view(c: Cluster) -> dict:
     total = max(1, len(c.reviews))  # an empty date window still answers, with zeros
     aspects = []
     for a, (pos, neg) in counts.items():
+        if a not in c.aspects:
+            continue
         n = pos + neg
         low, high = wilson(pos, n)
         # shared issue: complaints common AND few properties differ significantly from the cluster rate
@@ -321,7 +339,7 @@ def destination_view(c: Cluster) -> dict:
         sentiment[r.sentiment] += 1
     return {
         "slug": c.slug, "name": c.name, "kind": c.kind, "source": c.source, "demo": c.demo, **_period(c.reviews),
-        "reviews": len(c.reviews), "sentiment": dict(sentiment),
+        "reviews": len(c.reviews), "sentiment": dict(sentiment), "label_sources": c.label_sources,
         "trend_note": ("Destination trends mix every property: a change can come from which places were reviewed, "
                        "not only from how visits went. Check a property's own trend before acting on one."),
         "aspects": aspects,
@@ -330,17 +348,25 @@ def destination_view(c: Cluster) -> dict:
     }
 
 
-def benchmark(c: Cluster, property_id: str) -> dict | None:
-    """One property against the rest of its cluster, aspect by aspect."""
-    groups = _by_property(c)
-    mine = groups.get(property_id)
-    if not mine:
-        return None
+def _shared_issues(c: Cluster) -> set:
+    return {a["aspect"] for a in destination_view(c)["aspects"] if a["shared_issue"]}
+
+
+def _sources(reviews) -> dict:
+    counts = defaultdict(int)
+    for r in reviews:
+        if r.platform:
+            counts[r.platform] += 1
+    return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
+
+def _aspect_rows(c: Cluster, groups: dict, property_id: str, shared: set) -> list[dict]:
+    """Verdict per aspect for one property against all the others: the statistics behind both views."""
+    mine = groups[property_id]
     rest = [r for pid, rs in groups.items() if pid != property_id for r in rs]
     my_counts, rest_counts = _counts(mine), _counts(rest)
-    shared = {a["aspect"] for a in destination_view(c)["aspects"] if a["shared_issue"]}
     rows = []
-    for a in ASPECT_NAMES:
+    for a in c.aspects:
         pos, neg = my_counts[a]
         rpos, rneg = rest_counts[a]
         n, rn = pos + neg, rpos + rneg
@@ -359,14 +385,127 @@ def benchmark(c: Cluster, property_id: str) -> dict | None:
             "satisfaction": round(pos / n, 3) if n else None, "interval": [round(low, 3), round(high, 3)],
             "market_satisfaction": round(market, 3) if market is not None else None, "verdict": verdict,
             "shared_issue": a in shared,
-            "trend": _trend(mine, a),
         })
+    return rows
+
+
+def _ols(rows: list[list[float]], y: list[float]) -> tuple[list[float], list[float]] | None:
+    """Least squares by the normal equations (Gauss-Jordan): coefficients and their standard errors.
+    None when the design is singular or there are too few rows. Small and dependency-free on purpose."""
+    n, k = len(rows), len(rows[0])
+    if n <= k + 1:
+        return None
+    xtx = [[sum(r[i] * r[j] for r in rows) for j in range(k)] for i in range(k)]
+    xty = [sum(r[i] * yy for r, yy in zip(rows, y)) for i in range(k)]
+    aug = [xtx[i] + [1.0 if i == j else 0.0 for j in range(k)] for i in range(k)]   # [X'X | I] -> [I | (X'X)^-1]
+    for col in range(k):
+        pivot = max(range(col, k), key=lambda r: abs(aug[r][col]))
+        if abs(aug[pivot][col]) < 1e-9:
+            return None
+        aug[col], aug[pivot] = aug[pivot], aug[col]
+        p = aug[col][col]
+        aug[col] = [v / p for v in aug[col]]
+        for r in range(k):
+            if r != col and aug[r][col]:
+                f = aug[r][col]
+                aug[r] = [a - f * b for a, b in zip(aug[r], aug[col])]
+    inv = [row[k:] for row in aug]
+    beta = [sum(inv[i][j] * xty[j] for j in range(k)) for i in range(k)]
+    resid = [yy - sum(b * x for b, x in zip(beta, r)) for r, yy in zip(rows, y)]
+    sigma2 = sum(e * e for e in resid) / (n - k)
+    return beta, [math.sqrt(max(0.0, inv[i][i] * sigma2)) for i in range(k)]
+
+
+MIN_RATED = 100          # rated reviews needed before star costs are estimated at all
+MIN_COMPLAINTS = 15      # complaints about an aspect needed for its own star cost
+
+
+def star_costs(c: Cluster) -> dict:
+    """How many stars a complaint about each aspect is associated with, across the whole cluster.
+
+    Linear model: stars ~ complaint about each aspect + platform. Fitting the aspects together means a review that
+    complains about three things isn't counted three times; the platform terms absorb Google rating higher than
+    Booking.com. Association, not cause. Returns {aspect: {"cost", "interval", "complaints"}} for aspects with
+    enough complaints, cost in stars lost (positive = a complaint goes with fewer stars)."""
+    rated = [r for r in c.reviews if r.rating is not None]
+    if len(rated) < MIN_RATED:
+        return {}
+    aspects = [a for a in c.aspects if sum(r.aspects.get(a) == "negative" for r in rated) >= MIN_COMPLAINTS]
+    platforms = sorted({r.platform for r in rated}, key=lambda p: -sum(r.platform == p for r in rated))[1:]
+    rows = [[1.0] + [1.0 if r.aspects.get(a) == "negative" else 0.0 for a in aspects]
+            + [1.0 if r.platform == p else 0.0 for p in platforms] for r in rated]
+    fit = _ols(rows, [r.rating for r in rated]) if aspects else None
+    if not fit:
+        return {}
+    beta, se = fit
+    return {a: {"cost": round(-beta[i + 1], 3),
+                "interval": [round(-beta[i + 1] - Z95 * se[i + 1], 3), round(-beta[i + 1] + Z95 * se[i + 1], 3)],
+                "complaints": sum(r.aspects.get(a) == "negative" for r in rated)}
+            for i, a in enumerate(aspects)}
+
+
+def impact(c: Cluster, groups: dict, property_id: str) -> dict:
+    """Where a property's stars go: for each aspect it gets more complaints about than the rest of the market, the
+    rating it would likely gain by matching the market (extra complaints per review x stars per complaint).
+    Only aspects whose star cost is clearly above zero; largest likely gain first."""
+    costs = star_costs(c)
+    mine = groups[property_id]
+    rest = [r for pid, rs in groups.items() if pid != property_id for r in rs]
+    def avg(rs):
+        stars = [r.rating for r in rs if r.rating is not None]
+        return round(sum(stars) / len(stars), 2) if stars else None
+    rows = []
+    for a, cost in costs.items():
+        if not mine or not rest or cost["interval"][0] <= 0:
+            continue
+        mine_rate = sum(r.aspects.get(a) == "negative" for r in mine) / len(mine)
+        rest_rate = sum(r.aspects.get(a) == "negative" for r in rest) / len(rest)
+        gap = mine_rate - rest_rate
+        if gap <= 0:
+            continue
+        rows.append({"aspect": a, "label": ASPECT_NAMES[a], "stars_per_complaint": cost["cost"],
+                     "complaints_per_100": round(mine_rate * 100, 1), "market_complaints_per_100": round(rest_rate * 100, 1),
+                     "gain": round(gap * cost["cost"], 3),
+                     "gain_interval": [round(gap * cost["interval"][0], 3), round(gap * cost["interval"][1], 3)]})
+    rows.sort(key=lambda r: -r["gain"])
+    return {"rating": avg(mine), "market_rating": avg(rest), "rated_reviews": sum(r.rating is not None for r in mine),
+            "aspects": rows}
+
+
+def benchmark(c: Cluster, property_id: str) -> dict | None:
+    """One property against the rest of its cluster, aspect by aspect."""
+    groups = _by_property(c)
+    mine = groups.get(property_id)
+    if not mine:
+        return None
+    rows = _aspect_rows(c, groups, property_id, _shared_issues(c))
     order = {"lags": 0, "in_line": 1, "leads": 2, "too_few": 3}
     rows.sort(key=lambda r: (order[r["verdict"]], -(r["mentions"])))
     used: set = set()
     for row in rows:
+        row["trend"] = _trend(mine, row["aspect"])
         row["complaint_quotes"] = (_quotes(mine, row["aspect"], "negative", used)
                                    if row["verdict"] in ("lags", "in_line") else [])
     return {"cluster": c.slug, "cluster_name": c.name, "demo": c.demo, "property": {"id": property_id,
-            "name": c.properties.get(property_id, property_id), "reviews": len(mine)},
-            "competitors": len(groups) - 1, "aspects": rows}
+            "name": c.properties.get(property_id, property_id), "reviews": len(mine), "sources": _sources(mine)},
+            "competitors": len(groups) - 1, "aspects": rows, "impact": impact(c, groups, property_id)}
+
+
+def market_grid(c: Cluster) -> dict:
+    """Every property's verdict on every aspect at once: who leads, who lags, and what the whole market shares.
+    Properties are ordered by aspects led minus aspects lagged, so the table reads best to worst."""
+    groups = _by_property(c)
+    shared = _shared_issues(c)
+    props = []
+    for pid, rs in groups.items():
+        cells = {r["aspect"]: {k: r[k] for k in ("verdict", "satisfaction", "market_satisfaction", "mentions")}
+                 for r in _aspect_rows(c, groups, pid, shared)}
+        leads = sum(v["verdict"] == "leads" for v in cells.values())
+        lags = sum(v["verdict"] == "lags" for v in cells.values())
+        stars = [r.rating for r in rs if r.rating is not None]
+        props.append({"id": pid, "name": c.properties.get(pid, pid), "reviews": len(rs), "sources": _sources(rs),
+                      "rating": round(sum(stars) / len(stars), 2) if stars else None,
+                      "leads": leads, "lags": lags, "cells": cells})
+    props.sort(key=lambda p: (-(p["leads"] - p["lags"]), -p["reviews"]))
+    return {"cluster": c.slug, "demo": c.demo, "shared_issues": sorted(shared),
+            "aspects": [{"aspect": a, "label": ASPECT_NAMES[a]} for a in c.aspects], "properties": props}
