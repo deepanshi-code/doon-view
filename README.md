@@ -95,5 +95,6 @@ cd ml && python -m pytest tests                         # needs the training env
 - The classifier was trained on research-licensed hotel reviews; keep the model files private.
 - Cluster files hold review text for quotes: keep them out of git and out of public storage. The site shows
   aggregates and single-sentence quotes with reviewer names removed.
-- `frontend/public/img/mussoorie-valley-*.webp`: "Mussoorie 5" by Gannu03, Wikimedia Commons, CC BY-SA 4.0
-  (https://commons.wikimedia.org/wiki/File:Mussoorie_5.jpg), resized; shared under the same licence.
+- `frontend/public/img/mussoorie-mall-road-*.webp`: "Mussoorie SM-6-2026-04-07" (Mall Road) by SMarndi, Wikimedia
+  Commons, CC BY-SA 4.0 (https://commons.wikimedia.org/wiki/File:Mussoorie_SM-6-2026-04-07.jpg), resized; shared
+  under the same licence.

@@ -122,8 +122,8 @@ export default function Home() {
   return (
     <>
       <section className="relative isolate min-h-dvh overflow-hidden">
-        <Relief hotels={hotels} className="absolute inset-0 -z-10 [mask-image:linear-gradient(to_bottom,black_78%,transparent)]" />
-        <div className="mx-auto grid min-h-dvh max-w-[1240px] items-end gap-6 px-4 sm:px-6 pt-[42vh] lg:pt-32 pb-8 sm:pb-10 lg:grid-cols-[minmax(0,32rem)_minmax(0,1fr)]">
+        <Relief hotels={hotels} className="absolute inset-x-0 top-0 h-dvh -z-10 [mask-image:linear-gradient(to_bottom,black_78%,transparent)]" />
+        <div className="mx-auto grid min-h-dvh max-w-[1240px] items-end gap-6 px-4 sm:px-6 pt-[46vh] lg:pt-32 pb-8 sm:pb-10 lg:grid-cols-[minmax(0,32rem)_minmax(0,1fr)]">
           <div className="glass rise rounded-panel p-6 sm:p-8">
             <h1 className="text-[2.4rem] sm:text-[3.4rem] font-semibold leading-[1.02] tracking-[-0.035em] text-balance">Is this issue ours, or the market&rsquo;s?</h1>
             <p className="mt-4 max-w-[36ch] text-lg text-muted">
@@ -148,12 +148,15 @@ export default function Home() {
       {grid.data && <StarsVersusUs grid={grid.data} />}
 
       <section aria-labelledby="town-h" className="mx-auto grid max-w-[1240px] gap-8 px-4 sm:px-6 py-16 sm:py-20 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:items-center">
-        <figure className="m-0">
-          <img src="/img/mussoorie-valley-1600.webp" srcSet="/img/mussoorie-valley-800.webp 800w, /img/mussoorie-valley-1600.webp 1600w"
-            sizes="(min-width: 1024px) 700px, 100vw" width="1600" height="1200" loading="lazy" decoding="async"
-            alt="Forested ridges around Mussoorie under low cloud" className="block w-full h-auto aspect-[4/3] object-cover rounded-panel" />
+        <figure className="group m-0">
+          <div className="overflow-hidden rounded-panel">
+            <img src="/img/mussoorie-mall-road-1600.webp" srcSet="/img/mussoorie-mall-road-800.webp 800w, /img/mussoorie-mall-road-1600.webp 1600w"
+              sizes="(min-width: 1024px) 700px, 100vw" width="1600" height="1200" loading="lazy" decoding="async"
+              alt="Mall Road, Mussoorie: hotels and shops along the promenade under a clouded sky"
+              className="block w-full h-auto aspect-[4/3] object-cover motion-safe:transition-transform motion-safe:duration-700 motion-safe:ease-out group-hover:scale-[1.03]" />
+          </div>
           <figcaption className="mt-2 text-xs text-muted">
-            Photo: <a href="https://commons.wikimedia.org/wiki/File:Mussoorie_5.jpg" className="underline underline-offset-2">Gannu03</a>,{" "}
+            Mall Road, April 2026. Photo: <a href="https://commons.wikimedia.org/wiki/File:Mussoorie_SM-6-2026-04-07.jpg" className="underline underline-offset-2">SMarndi</a>,{" "}
             <a href="https://creativecommons.org/licenses/by-sa/4.0/" className="underline underline-offset-2">CC BY-SA 4.0</a>, resized
           </figcaption>
         </figure>

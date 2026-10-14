@@ -84,8 +84,8 @@ export default function Method() {
       <section aria-labelledby="credits-h" className="mt-10 px-1">
         <h2 id="credits-h" className="text-2xl font-semibold tracking-tight">Credits</h2>
         <p className="mt-3 max-w-[70ch] text-muted leading-relaxed">
-          Home page photo: &ldquo;Mussoorie 5&rdquo; by Gannu03, from{" "}
-          <a href="https://commons.wikimedia.org/wiki/File:Mussoorie_5.jpg" className="text-accent underline underline-offset-3">Wikimedia Commons</a>, licensed{" "}
+          Home page photo: &ldquo;Mussoorie SM-6-2026-04-07&rdquo; (Mall Road) by SMarndi, from{" "}
+          <a href="https://commons.wikimedia.org/wiki/File:Mussoorie_SM-6-2026-04-07.jpg" className="text-accent underline underline-offset-3">Wikimedia Commons</a>, licensed{" "}
           <a href="https://creativecommons.org/licenses/by-sa/4.0/" className="text-accent underline underline-offset-3">CC BY-SA 4.0</a>; resized and re-encoded, shared under the same licence.
         </p>
       </section>
