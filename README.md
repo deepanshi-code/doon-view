@@ -3,12 +3,17 @@
 Review intelligence for Uttarakhand's hill towns, built for the AI–Tourism Hackathon (UNWTO theme: digital agenda and
 AI to redesign tourism). It reads every recent review of every property in a market together and shows:
 
+- **Is this issue ours, or the market's?** Each hotel against the other hotels in its town, aspect by aspect: yours
+  to fix, a complaint the whole town shares, or your edge. Ahead or behind only when the gap holds at 95%; no
+  verdict when there are too few mentions to tell.
+- **Where your stars go**: which complaint costs a hotel the most stars, estimated from guests' own ratings (a
+  linear model of stars on per-aspect complaints, platform held apart), so an owner knows what to fix first.
 - **What visitors say about the destination**: satisfaction per aspect with a 95% range, complaints per 100 reviews,
-  market-wide issues (a gap for whoever fixes them first), turning points and emerging complaints, with real quotes.
-- **One property against its market**: ahead, behind or in line on each aspect, and no verdict when there are too
-  few mentions to tell.
+  turning points and emerging complaints, with real quotes.
 
-Recent reviews only by default (2025–26); "All time" is one click away.
+Recent reviews only by default (2025-26); "All time" is one click away. The site (React, Tailwind, three.js for the
+ridge relief behind each page, loaded lazily with a still frame under reduced motion and a fallback without WebGL)
+has a home page, a page per hotel, a town page and a Method page.
 
 ## How it works
 
@@ -51,6 +56,9 @@ python -m scripts.build_cluster --csv ../data/mussoorie.csv --slug mussoorie --n
     --source "Collected <date> from public listings: <how>."
 ```
 
+The team's own Mussoorie collection (`data/reviews.csv` and `data/hotels.csv`, format in `data/DATA_CHANGELOG.md`)
+builds with `--doonview ../data/reviews.csv` in place of `--csv`.
+
 `--check` reports per property how many reviews fall in the default period and whether verdicts will be possible,
 without labelling anything. Collect reviews by hand or through official APIs within their terms; don't scrape sites
 whose terms forbid it.
@@ -58,23 +66,28 @@ whose terms forbid it.
 ## Train the model on the Mussoorie reviews (B200)
 
 `ml/` fine-tunes the classifier on the collected Mussoorie reviews only (`data/reviews.csv`, see
-`data/DATA_CHANGELOG.md`). Sentiment comes from the guests' stars; aspects (including booking) from an open LLM
-teacher run once on the GPU. Every candidate is scored by 5-fold cross-validation on the same 1,657 reviews, with
-95% bootstrap intervals, against TF-IDF, keyword rules and the current app model.
+`data/DATA_CHANGELOG.md`), optionally mixed with outside TripAdvisor reviews (research licence: the resulting model
+stays private). Sentiment comes from the guests' stars; aspects (including booking) from an open LLM teacher run
+once on the GPU. Every candidate is scored by 5-fold cross-validation on the Mussoorie reviews only, with 95%
+bootstrap intervals, against TF-IDF, keyword rules and the current app model; `pick` ships a candidate only if it
+beats the current model on both sentiment and complaint F1.
 
 ```bash
 mkdir -p /workspace/doonview && cd /workspace/doonview && python3 -m zipfile -e doon-view-train.zip .
 export HF_TOKEN=<write token>   # optional: current-model comparison and private backup
-bash ml/train_b200.sh
+bash ml/train_b200.sh           # Mussoorie only; ml/train_mix_b200.sh and ml/train_auto_b200.sh add outside data
 ```
 
-The result is `ml/artifacts/doon-view-deberta-v3-xsmall.zip`, which the app loads through `MODEL_DIR` or `MODEL_URL`.
+The result is a model zip under `ml/artifacts/`, which the app loads through `MODEL_DIR` or `MODEL_URL`. Before
+switching the app to a new model, rebuild the cluster with it and compare the labels on real reviews: an int8 export
+is only checked against its full-precision model on sentiment, not on aspects.
 
 ## Tests
 
 ```bash
 cd backend && .venv/Scripts/python -m pytest          # TEST_MODEL_DIR=model also runs the real-model tests
 cd frontend && npm run lint && npm test && npm run build
+cd ml && python -m pytest tests                         # needs the training environment (pandas, numpy)
 ```
 
 ## Data and licences
@@ -82,3 +95,5 @@ cd frontend && npm run lint && npm test && npm run build
 - The classifier was trained on research-licensed hotel reviews; keep the model files private.
 - Cluster files hold review text for quotes: keep them out of git and out of public storage. The site shows
   aggregates and single-sentence quotes with reviewer names removed.
+- `frontend/public/img/mussoorie-valley-*.webp`: "Mussoorie 5" by Gannu03, Wikimedia Commons, CC BY-SA 4.0
+  (https://commons.wikimedia.org/wiki/File:Mussoorie_5.jpg), resized; shared under the same licence.
