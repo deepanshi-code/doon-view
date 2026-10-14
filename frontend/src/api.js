@@ -24,6 +24,7 @@ export function periodQuery({ since, until }) {
 export const api = {
   clusters: () => get("/clusters"),
   destination: (slug, period) => get(`/clusters/${encodeURIComponent(slug)}${periodQuery(period)}`),
+  grid: (slug, period) => get(`/clusters/${encodeURIComponent(slug)}/grid${periodQuery(period)}`),
   benchmark: (slug, id, period) =>
     get(`/clusters/${encodeURIComponent(slug)}/properties/${encodeURIComponent(id)}${periodQuery(period)}`),
 }

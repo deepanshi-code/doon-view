@@ -1,45 +1,49 @@
 @import "tailwindcss";
-@import "@fontsource-variable/bricolage-grotesque";
-@import "@fontsource-variable/hanken-grotesk";
+@import "@fontsource-variable/geist";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Ridgeline: slate + a saffron signature, split-complementary with slate-teal. Contrast is computed by script
-   (.claude/design/gen_themes.py): every text pair >= 4.5:1 and UI pair >= 3:1 in both modes. */
+/* Midnight Ridge (chosen 2026-10-14, .claude/design.md): deep navy, moonlit relief, champagne-gold accent.
+   - Dark is the brand default; light is porcelain with a dark gold.
+   - One accent (gold) for links, buttons and the selected state. Green / coral only for ahead / behind, always
+     beside a word or a signed number.
+   - Spatial UI: frosted panels at 86% opacity, so contrast is computed against --surface.
+   - Shape rule: panels 20px (rounded-panel), controls 12px (rounded-ctl). Data cells stay square.
+   Contrast (script, .claude/design/gen_spatial.py): text >= 5.27:1, boundaries >= 3.04:1, light and dark. */
 :root {
-  --bg: #f4f2ef;
+  --bg: #f1f3f6;
   --surface: #ffffff;
-  --ink: #1b1e2b;
-  --muted: #565b6e;
-  --accent: #b93c0b;
+  --ink: #11151f;
+  --muted: #4f5666;
+  --accent: #7a5a14;
   --on-accent: #ffffff;
-  --highlight: #0d6166;
-  --danger: #b42318;
-  --success: #1f7a4d;
-  --border: #dcd8d2;
-  --border-strong: #858a99;
-  --focus: #b93c0b;
-  --band: #b93c0b2e;
-  --ridge-1: #b93c0b;
-  --ridge-2: #0d6166;
+  --danger: #b3261e;
+  --success: #15734a;
+  --neutral: #a3abb8;
+  --border: #d7dce4;
+  --border-strong: #848c9b;
+  --focus: #7a5a14;
+  --band: #7a5a1440;
+  --hatch: #11151f24;
+  --shadow: #11151f2e;
   color-scheme: light;
 }
 .dark {
-  --bg: #12131c;
-  --surface: #1b1d29;
-  --ink: #f1efea;
-  --muted: #a9adbd;
-  --accent: #fb923c;
-  --on-accent: #12131c;
-  --highlight: #5ec4c9;
-  --danger: #ff8a7a;
-  --success: #6fd39c;
-  --border: #2c2f40;
-  --border-strong: #707690;
-  --focus: #fb923c;
-  --band: #fb923c40;
-  --ridge-1: #fb923c;
-  --ridge-2: #5ec4c9;
+  --bg: #090d18;
+  --surface: #121828;
+  --ink: #ecebe6;
+  --muted: #a9adb9;
+  --accent: #d8b46a;
+  --on-accent: #090d18;
+  --danger: #ff8f80;
+  --success: #63d6a0;
+  --neutral: #59627a;
+  --border: #232b3d;
+  --border-strong: #5d6679;
+  --focus: #d8b46a;
+  --band: #d8b46a45;
+  --hatch: #ecebe626;
+  --shadow: #000000a6;
   color-scheme: dark;
 }
 
@@ -50,25 +54,56 @@
   --color-muted: var(--muted);
   --color-accent: var(--accent);
   --color-on-accent: var(--on-accent);
-  --color-highlight: var(--highlight);
   --color-danger: var(--danger);
   --color-success: var(--success);
+  --color-neutral: var(--neutral);
   --color-line: var(--border);
   --color-line-strong: var(--border-strong);
   --color-focus: var(--focus);
   --color-band: var(--band);
-  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, sans-serif;
-  --font-body: "Hanken Grotesk Variable", ui-sans-serif, sans-serif;
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --radius-panel: 20px;
+  --radius-ctl: 12px;
 }
 
 html {
   background: var(--bg);
   color: var(--ink);
-  font-family: var(--font-body);
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
 body { min-height: 100dvh; }
 
-:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 
 .tabular { font-variant-numeric: tabular-nums; }
+
+/* "Too few mentions": a hatch, so it never reads as a verdict colour */
+.bg-hatch { background-image: repeating-linear-gradient(135deg, var(--hatch) 0 2px, transparent 2px 6px); }
+
+/* Frosted panel floating above the relief. 86% opaque so text contrast holds over any part of the scene. */
+.glass {
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid color-mix(in srgb, var(--ink) 10%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 14%, transparent), 0 24px 60px -28px var(--shadow);
+}
+@media (prefers-reduced-transparency: reduce) {
+  .glass { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+
+/* Panels rise into place from a readable opacity (never from 0: the page must read even if the timeline stalls) */
+@media (prefers-reduced-motion: no-preference) {
+  .rise { animation: rise 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+  .rise-2 { animation-delay: 0.08s; }
+  .rise-3 { animation-delay: 0.16s; }
+  @keyframes rise { from { opacity: 0.6; transform: translateY(14px); } }
+}
+
+/* The relief's stand-in while three.js loads, and its replacement when WebGL is unavailable */
+.relief-poster {
+  background:
+    radial-gradient(120% 70% at 50% 18%, color-mix(in srgb, var(--neutral) 55%, transparent), transparent 62%),
+    linear-gradient(180deg, var(--bg) 0%, color-mix(in srgb, var(--neutral) 35%, var(--bg)) 55%, var(--bg) 100%);
+}

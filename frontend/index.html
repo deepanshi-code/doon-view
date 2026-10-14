@@ -4,19 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Doon View: what visitors say about Mussoorie's hotels, and how each property compares with its market." />
-    <meta name="theme-color" content="#f4f2ef" id="theme-color-meta" />
+    <meta name="theme-color" content="#090d18" id="theme-color-meta" />
     <title>Doon View</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <script>
       (function () {
+        // Midnight Ridge is dark by default; a stored choice from the toggle wins.
         var stored = null;
         try { stored = localStorage.getItem('theme'); } catch (e) {}
-        var dark = stored === 'dark' || (!stored && window.matchMedia('(prefers-color-scheme: dark)').matches);
-        if (dark) {
-          document.documentElement.classList.add('dark');
-          document.getElementById('theme-color-meta').setAttribute('content', '#12131c');
-        }
+        if (stored !== 'light') document.documentElement.classList.add('dark');
+        else document.getElementById('theme-color-meta').setAttribute('content', '#f1f3f6');
       })();
     </script>
   </head>

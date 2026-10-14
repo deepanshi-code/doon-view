@@ -5,10 +5,11 @@ import Home from "./pages/Home"
 
 // Home ships in the main bundle (first paint); the other pages are their own chunks
 const Destination = lazy(() => import("./pages/Destination"))
+const Hotel = lazy(() => import("./pages/Hotel"))
 const Method = lazy(() => import("./pages/Method"))
 
 function NotFound() {
-  return <div className="max-w-6xl mx-auto px-4 sm:px-6 py-24"><h1 className="font-display text-4xl font-extrabold">Page not found</h1></div>
+  return <div className="max-w-[1240px] mx-auto px-4 sm:px-6 pt-32 pb-24"><h1 className="text-4xl font-semibold tracking-tight">Page not found</h1></div>
 }
 
 export default function App() {
@@ -19,6 +20,7 @@ export default function App() {
           <Route element={<Shell />}>
             <Route index element={<Home />} />
             <Route path="d/:slug" element={<Destination />} />
+            <Route path="d/:slug/h/:pid" element={<Hotel />} />
             <Route path="method" element={<Method />} />
             <Route path="*" element={<NotFound />} />
           </Route>
