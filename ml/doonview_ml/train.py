@@ -1,14 +1,17 @@
-"""Fine-tune the multi-task classifier on the Mussoorie reviews only.
+"""Fine-tune the multi-task classifier on the Mussoorie reviews, optionally mixed with outside hotel reviews.
 
     # 5-fold cross-validation: every review is scored by a model that never saw it (out-of-fold predictions)
     python -m doonview_ml.train cv --backbone microsoft/deberta-v3-xsmall --teacher data/processed/teacher/X.jsonl \
         --out runs/cv-deberta-v3-xsmall-s13
+    # mixed: outside reviews (doonview_ml.external) in every training set, Mussoorie reviews repeated 3 times
+    python -m doonview_ml.train cv ... --external data/external --repeat 3 --out runs/cv-mix-deberta-v3-xsmall-s13
     # the shipped model: all reviews, the epoch count cross-validation chose
     python -m doonview_ml.train final --backbone microsoft/deberta-v3-xsmall --teacher ... --epochs 5 --out runs/final-...
 
 Targets: sentiment from the guests' stars; aspects and spam from the teacher LLM (a review it failed to label has
 no aspect target). 1,657 reviews is small and 88% positive, so sentiment uses inverse-frequency class weights and
-each aspect its own square-root weights; nothing is tuned on a fold that is then reported.
+each aspect its own square-root weights; nothing is tuned on a fold that is then reported. Outside reviews are only
+ever trained on: the folds, and so every reported score, are Mussoorie reviews only.
 """
 import argparse
 import json
@@ -169,17 +172,41 @@ def fit(train_df, eval_df, teacher, args, on_epoch=None):
     return model, tok
 
 
-def load_data(args) -> tuple[pd.DataFrame, dict]:
+TRAIN_COLUMNS = ["review_id", "text", "sentiment"]
+
+
+def load_data(args) -> tuple[pd.DataFrame, dict, pd.DataFrame | None]:
     df = pd.read_parquet(Path(args.data) / "reviews.parquet")
     teacher = read_labels(Path(args.teacher)) if args.teacher else {}
     if args.limit:
         df = df.groupby("fold").head(max(2, args.limit // df["fold"].nunique())).reset_index(drop=True)
     print(f"{len(df)} reviews, {sum(r in teacher for r in df.review_id)} with teacher labels")
-    return df, teacher
+    external = None
+    if args.external:
+        external = pd.read_parquet(Path(args.external) / "reviews.parquet")
+        if args.limit:
+            external = external.head(args.limit)
+        if set(external["review_id"]) & set(df["review_id"]):
+            raise SystemExit("outside and Mussoorie review ids overlap: a review would be trained and tested on")
+        # the same teacher model labelled both sets: its file has the same name in the outside folder
+        ext_labels = read_labels(Path(args.external) / "teacher" / Path(args.teacher).name) if args.teacher else {}
+        teacher = {**ext_labels, **teacher}
+        print(f"+ {len(external)} outside reviews ({sum(r in ext_labels for r in external.review_id)} with teacher "
+              f"labels), Mussoorie reviews repeated x{args.repeat} in training")
+    return df, teacher, external
+
+
+def training_set(mussoorie: pd.DataFrame, external: pd.DataFrame | None, repeat: int) -> pd.DataFrame:
+    """Mussoorie rows repeated `repeat` times plus the outside rows, so ~15,000 outside reviews don't drown out
+    ~1,300 local ones. Only for training: evaluation always uses the Mussoorie fold alone."""
+    parts = [mussoorie[TRAIN_COLUMNS]] * (repeat if external is not None else 1)
+    if external is not None:
+        parts.append(external[TRAIN_COLUMNS])
+    return pd.concat(parts, ignore_index=True)
 
 
 def run_cv(args) -> None:
-    df, teacher = load_data(args)
+    df, teacher, external = load_data(args)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     folds = sorted(df["fold"].unique())
@@ -188,7 +215,9 @@ def run_cv(args) -> None:
     per_fold = []
     for k in folds:
         test_idx = np.where(df["fold"] == k)[0]
-        print(f"fold {k}: train {len(df) - len(test_idx)}, test {len(test_idx)}", flush=True)
+        train_df = training_set(df.iloc[np.setdiff1d(np.arange(len(df)), test_idx)], external, args.repeat)
+        print(f"fold {k}: train {len(train_df)} rows ({len(df) - len(test_idx)} Mussoorie reviews), "
+              f"test {len(test_idx)} Mussoorie reviews", flush=True)
         y_test = targets(df.iloc[test_idx], teacher)
 
         def on_epoch(epoch, pred, test_idx=test_idx, y_test=y_test, k=k):
@@ -199,7 +228,7 @@ def run_cv(args) -> None:
             per_fold.append({"fold": int(k), "epoch": epoch, **quick_metrics(pred, y_test)})
             print(f"    fold {k} epoch {epoch}: {json.dumps(per_fold[-1])}", flush=True)
 
-        fit(df.iloc[np.setdiff1d(np.arange(len(df)), test_idx)], df.iloc[test_idx], teacher, args, on_epoch)
+        fit(train_df, df.iloc[test_idx], teacher, args, on_epoch)
 
     y_all = targets(df, teacher)
     by_epoch = {e: quick_metrics(oof[e], y_all) for e in oof}
@@ -207,6 +236,8 @@ def run_cv(args) -> None:
     np.savez_compressed(out / "oof.npz", review_id=df["review_id"].to_numpy(), **oof[best])
     summary = {"backbone": args.backbone, "seed": args.seed, "lr": args.lr, "batch_size": args.batch_size,
                "max_len": args.max_len, "epochs_tried": args.epochs, "best_epochs": best,
+               "external": args.external, "external_rows": 0 if external is None else len(external),
+               "mussoorie_repeat": args.repeat if external is not None else 1,
                "oof_by_epoch": by_epoch, "per_fold": per_fold, "teacher": args.teacher,
                "note": "best_epochs is chosen on the same out-of-fold scores it reports: slightly optimistic"}
     (out / "cv.json").write_text(json.dumps(summary, indent=2))
@@ -214,12 +245,16 @@ def run_cv(args) -> None:
 
 
 def run_final(args) -> None:
-    df, teacher = load_data(args)
-    model, tok = fit(df, None, teacher, args)
+    df, teacher, external = load_data(args)
+    train_df = training_set(df, external, args.repeat)
+    model, tok = fit(train_df, None, teacher, args)
+    data = ("Mussoorie reviews only (data/reviews.csv)" if external is None else
+            f"Mussoorie reviews (x{args.repeat}) + {len(external)} TripAdvisor reviews (jniimi/tripadvisor-review-rating:"
+            " academic, non-commercial use; keep this model private)")
     config = {"backbone": args.backbone, "sentiments": list(SENTIMENTS), "aspects": list(ASPECTS),
               "aspect_values": list(ASPECT_VALUES), "max_len": args.max_len, "spam_threshold": SPAM_THRESHOLD,
-              "epochs": args.epochs, "lr": args.lr, "seed": args.seed, "train_rows": len(df), "teacher": args.teacher,
-              "data": "Mussoorie reviews only (data/reviews.csv)",
+              "epochs": args.epochs, "lr": args.lr, "seed": args.seed, "train_rows": len(train_df),
+              "teacher": args.teacher, "data": data,
               "versions": {"torch": torch.__version__, "transformers": transformers.__version__}}
     model.save(Path(args.out), tok, config)
     print(f"saved {args.out}")
@@ -238,6 +273,8 @@ def main() -> None:
     p.add_argument("--max-len", type=int, default=256)
     p.add_argument("--seed", type=int, default=13)
     p.add_argument("--limit", type=int, help="smoke tests: this many reviews in total")
+    p.add_argument("--external", help="folder from doonview_ml.external: outside reviews added to every training set")
+    p.add_argument("--repeat", type=int, default=3, help="with --external: times each Mussoorie review is trained on")
     args = p.parse_args()
     run_cv(args) if args.mode == "cv" else run_final(args)
 

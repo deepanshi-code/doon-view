@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from doonview_ml import external, pick
 from doonview_ml.data import build
 from doonview_ml.evaluate import aspect_report, sentiment_report
 from doonview_ml.labels import ASPECTS, rating_to_polarity, rating_to_sentiment
-from doonview_ml.train import IGNORE, targets
+from doonview_ml.train import IGNORE, targets, training_set
 
 
 @pytest.fixture
@@ -55,6 +56,56 @@ def test_subrating_check_ignores_reviews_without_a_subrating():
     df = pd.DataFrame({"review_id": list("abcd"), "sub_location": [5.0, np.nan, 1.0, 3.0]})
     report = aspect_report(df, {"location": ["positive", "positive", "negative", "positive"]}, {})
     assert report["vs_subratings"]["location"] == {"polarity_accuracy": 1.0, "n": 2}
+
+
+def _raw_tripadvisor(n_per_star=200):
+    rows, i = [], 0
+    for stars in (1, 2, 3, 4, 5):
+        for _ in range(n_per_star):
+            rows.append({"hotel_id": i, "user_id": f"u{i}", "overall": float(stars),
+                         "review": f"Review {i}: the room was fine and the staff were helpful during our stay."})
+            i += 1
+    rows += [{"hotel_id": 9001, "user_id": "short", "overall": 1.0, "review": "Bad."},             # too short
+             {"hotel_id": 9002, "user_id": "long", "overall": 1.0, "review": "word " * 401},       # too long
+             {"hotel_id": 9003, "user_id": "u0", "overall": 1.0, "review": "Same author again, a whole new review."},
+             {"hotel_id": 9004, "user_id": "dup", "overall": 5.0, "review": rows[5]["review"].upper()}]  # duplicate
+    return pd.DataFrame(rows)
+
+
+def test_outside_sample_favours_complaints_and_is_never_scored():
+    df = external.build(_raw_tripadvisor(), rows=300, seed=13)
+    assert df["sentiment"].value_counts().to_dict() == {"positive": 150, "negative": 90, "neutral": 60}
+    assert (df["fold"] == -1).all() and df["review_id"].str.startswith("ta-").all()
+    assert not df["review_id"].isin(["ta-9001", "ta-9002", "ta-9003", "ta-9004"]).any()
+    assert df["group"].is_unique and df["text"].str.lower().is_unique
+    bigger = external.build(_raw_tripadvisor(), rows=500, seed=13, keep=df)   # top-up: labelled rows are kept
+    assert set(df["review_id"]) <= set(bigger["review_id"]) and len(bigger) == 500
+
+
+def test_training_set_repeats_mussoorie_and_adds_outside_rows():
+    local = pd.DataFrame({"review_id": ["a", "b"], "text": ["x", "y"], "sentiment": ["positive", "negative"], "fold": [0, 1]})
+    outside = pd.DataFrame({"review_id": ["ta-1"], "text": ["z"], "sentiment": ["neutral"], "fold": [-1]})
+    mixed = training_set(local, outside, repeat=3)
+    assert mixed["review_id"].value_counts().to_dict() == {"a": 3, "b": 3, "ta-1": 1}
+    assert list(training_set(local, None, repeat=3)["review_id"]) == ["a", "b"]   # no outside data: no repeats
+
+
+def _row(sentiment, f1s):
+    return {"sentiment": {"macro_f1": sentiment}, "aspects": {"negative_f1_vs_teacher": f1s}}
+
+
+def test_pick_scores_shared_aspects_and_ships_only_a_model_better_on_both():
+    metrics = {
+        "cv cv-auto-deberta-v3-xsmall-s13": _row(0.84, {"food": 0.6, "wifi": 0.6, "booking": 0.1}),
+        "cv cv-auto-deberta-v3-base-s13": _row(0.85, {"food": 0.8, "wifi": 0.8, "booking": 0.1}),
+        "cv cv-deberta-v3-base-s13": _row(0.99, {"food": 0.99, "wifi": 0.99}),        # another run: not competing
+        "current model (x)": _row(0.79, {"food": 0.7, "wifi": 0.7}),
+    }
+    out = pick.choose(metrics, "auto-")
+    assert out["aspects"] == ["food", "wifi"]                       # booking: the current model can't be compared
+    assert out["best"]["run"] == "cv-auto-deberta-v3-base-s13" and out["ships"] is True
+    metrics["current model (x)"] = _row(0.79, {"food": 0.9, "wifi": 0.9})
+    assert pick.choose(metrics, "auto-")["ships"] is False          # better sentiment, worse complaints: keep current
 
 
 def test_sentiment_report_counts_classes_and_interval_contains_the_score():

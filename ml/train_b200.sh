@@ -18,6 +18,12 @@
 #   final     the shipped backbone trained on all reviews, for the epoch count cross-validation chose
 #   export    int8 ONNX the app loads, with its CPU self-check answers, zipped
 #   backup    model zip + results to a PRIVATE Hugging Face repo (never the review data)
+#
+# Mixed model (train_mix_b200.sh sets these): EXTERNAL_ROWS=15000 adds two stages,
+#   ext_data     a TripAdvisor sample (doonview_ml.external): trained on, never scored
+#   ext_teacher  labelled by the SAME teacher model as the Mussoorie reviews
+# and RUN_TAG=mix gives the run its own log, runs/cv-mix-*, runs/report-mix and doon-view-mix-*.zip, so earlier
+# results stay where they are; setup, data and the Mussoorie teacher labels are reused.
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./python_env.sh
@@ -33,18 +39,30 @@ EPOCHS="${EPOCHS:-8}"                    # tried in cross-validation; the best c
 COMPARE_REPO="${COMPARE_REPO:-strange-exe/revlens-classifier}"     # the model the app uses today
 COMPARE_FILE="${COMPARE_FILE:-deberta-v3-xsmall-s13-food2-u8.zip}"
 HF_REPO="${HF_REPO:-}"                   # default <your user>/doon-view-model (always private)
-STAGES="${STAGES:-setup test data teacher cv evaluate final export backup}"
+RUN_TAG="${RUN_TAG:-}"                   # e.g. "mix": this run's names don't collide with earlier runs'
+EXTERNAL_ROWS="${EXTERNAL_ROWS:-0}"      # > 0: that many outside reviews in every training set
+MUSSOORIE_REPEAT="${MUSSOORIE_REPEAT:-3}"  # with outside reviews: times each Mussoorie review is trained on
+LAUNCHER="${LAUNCHER:-train_b200.sh}"
+AUTO_SELECT="${AUTO_SELECT:-0}"          # 1: the best backbone by a fixed rule (doonview_ml.pick) is the one shipped
+default_stages="setup test data teacher"
+(( EXTERNAL_ROWS > 0 )) && default_stages+=" ext_data ext_teacher"
+default_stages+=" cv evaluate"
+(( AUTO_SELECT == 1 )) && default_stages+=" pick"
+STAGES="${STAGES:-$default_stages final export backup}"
 TORCH_CUDA="${TORCH_CUDA:-}"
 DATA=data/processed
-LOG=runs/train.log
-PIDFILE=runs/train.pid
+EXT=data/external
+SUFFIX="${RUN_TAG:+-$RUN_TAG}"           # report-mix, train-mix.log, doon-view-results-mix.tgz
+PREFIX="${RUN_TAG:+$RUN_TAG-}"           # cv-mix-deberta-..., final-mix-..., doon-view-mix-...
+LOG="runs/train$SUFFIX.log"
+PIDFILE="runs/train$SUFFIX.pid"
 mkdir -p runs/logs
 
 say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m%s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mSTOPPED: %s\033[0m\n' "$*"; rm -f "$PIDFILE"; exit 1; }
 follow_log() {
-  echo "Live log below. Ctrl+C stops WATCHING only; the run continues. Watch again or resume: bash $(pwd)/train_b200.sh"
+  echo "Live log below. Ctrl+C stops WATCHING only; the run continues. Watch again or resume: bash $(pwd)/$LAUNCHER"
   exec tail -n 200 -f "$LOG"
 }
 
@@ -72,6 +90,9 @@ if [[ -z "${TRAIN_INSIDE:-}" ]]; then
   fi
   free_gb=$(( $(df -Pk . | awk 'NR==2 {print $4}') / 1024 / 1024 ))
   (( free_gb >= 80 )) || die "only ${free_gb} GB free; the teacher LLM (~31 GB), two environments and models need ~80 GB"
+  if (( EXTERNAL_ROWS > 0 )); then
+    warn "Mixed run: $EXTERNAL_ROWS TripAdvisor reviews (academic, non-commercial use). Keep the resulting model private."
+  fi
   [[ -n "${HF_TOKEN:-}" ]] || warn "HF_TOKEN not set: no comparison with the current model and no backup."
   echo "preflight OK: $(nvidia-smi -L | head -1 | cut -c1-70) | ${free_gb} GB free | $(python3 -V)"
   : > "$LOG"
@@ -97,16 +118,17 @@ mkdir -p "$HF_HOME"
 log()  { printf '\n\033[1m[%s] %s\033[0m\n' "$(date +%H:%M:%S)" "$*"; }
 want() { [[ " $STAGES " == *" $1 "* ]]; }
 stage() {  # stage <name> <function>: run unless done; only mark done if it really succeeded
-  local name=$1 fn=$2
+  local name=$1 fn=$2 key=$1
   want "$name" || return 0
-  if [[ -f "runs/.done_$name" ]]; then log "skip $name (done; rm runs/.done_$name to redo)"; return; fi
+  case $name in cv|evaluate|pick|final|export|backup) key="$name$SUFFIX" ;; esac  # per run tag; the rest is shared
+  if [[ -f "runs/.done_$key" ]]; then log "skip $name (done; rm runs/.done_$key to redo)"; return; fi
   log "stage: $name"
   set +e
-  ( set -e; "$fn" ) 2>&1 | tee "runs/logs/$name.log"
+  ( set -e; "$fn" ) 2>&1 | tee "runs/logs/$key.log"
   local rc=${PIPESTATUS[0]}
   set -e
-  (( rc == 0 )) || { log "FAILED: $name (exit $rc), log runs/logs/$name.log"; exit "$rc"; }
-  date > "runs/.done_$name"
+  (( rc == 0 )) || { log "FAILED: $name (exit $rc), log runs/logs/$key.log"; exit "$rc"; }
+  date > "runs/.done_$key"
 }
 
 driver_cuda_tag() {  # the PyTorch CUDA build this driver can run (Blackwell needs CUDA >= 12.8)
@@ -160,8 +182,8 @@ data() {
   .venv/bin/python -m doonview_ml.data --reviews ../data/reviews.csv --sub-ratings ../data/sub_ratings.csv --out "$DATA"
 }
 
-serve_and_label() {  # serve_and_label <model>: vLLM server, label everything, stop the server; 1 if it can't serve
-  local model=$1 pid ready=0
+serve_and_label() {  # serve_and_label <model> [data dir]: vLLM server, label everything, stop it; 1 if it can't serve
+  local model=$1 dir=${2:-$DATA} pid ready=0
   .venv-teacher/bin/vllm serve "$model" --port "$TEACHER_PORT" --max-model-len 4096 --gpu-memory-utilization 0.85 \
     > "runs/logs/vllm-${model##*/}.log" 2>&1 &
   pid=$!
@@ -177,7 +199,7 @@ serve_and_label() {  # serve_and_label <model>: vLLM server, label everything, s
   fi
   local rc=0
   .venv/bin/python -m doonview_ml.teacher --backend openai --model "$model" \
-    --base-url "http://localhost:$TEACHER_PORT/v1" --data "$DATA" --workers 32 || rc=$?
+    --base-url "http://localhost:$TEACHER_PORT/v1" --data "$dir" --workers 32 || rc=$?
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true   # free the GPU for training
   return $rc
 }
@@ -194,6 +216,7 @@ teacher() {
     used=$TEACHER_FALLBACK
   fi
   echo "${used##*/}" > runs/teacher-name
+  echo "$used" > runs/teacher-model
   local labels="$DATA/teacher/${used##*/}.jsonl"
   echo "teacher $used: $(wc -l < "$labels") labels"
   .venv/bin/python - "$labels" <<'PY'
@@ -205,6 +228,68 @@ PY
 
 teacher_labels() { echo "$DATA/teacher/$(cat runs/teacher-name).jsonl"; }
 
+teacher_model() {  # the full id of the model that labelled the Mussoorie reviews (older runs saved only its name)
+  if [[ -f runs/teacher-model ]]; then cat runs/teacher-model; return; fi
+  local name; name=$(cat runs/teacher-name)
+  for m in "$TEACHER_MODEL" "$TEACHER_FALLBACK"; do [[ ${m##*/} == "$name" ]] && { echo "$m"; return; }; done
+  echo "runs/teacher-name says $name, which is neither TEACHER_MODEL nor TEACHER_FALLBACK: set TEACHER_MODEL" >&2
+  return 1
+}
+
+ext_data() { .venv/bin/python -m doonview_ml.external --out "$EXT" --rows "$EXTERNAL_ROWS"; }
+
+ext_teacher() {  # one teacher for both sets, or the mixed labels would disagree on what counts as a complaint
+  local model; model=$(teacher_model)
+  echo "labelling the outside reviews with $model (the Mussoorie reviews' teacher)"
+  if [[ -f runs/vllm_ok ]]; then
+    serve_and_label "$model" "$EXT" || { echo "vLLM could not serve $model: not mixing teachers, stopping"; return 1; }
+  else
+    .venv/bin/python -m doonview_ml.teacher --backend hf --model "$model" --data "$EXT" --batch-size 16
+  fi
+  local labels="$EXT/teacher/${model##*/}.jsonl" rows
+  rows=$(.venv/bin/python -c "import pandas as pd; print(len(pd.read_parquet('$EXT/reviews.parquet')))")
+  echo "outside reviews: $(wc -l < "$labels") of $rows labelled"
+}
+
+ext_args() { (( EXTERNAL_ROWS > 0 )) && echo "--external $EXT --repeat $MUSSOORIE_REPEAT" || true; }
+
+refresh_inputs() {  # new reviews.csv or a different outside sample size: redo those stages (labels resume by id)
+  local stale
+  stale=$(.venv/bin/python - "$DATA/manifest.json" ../data/reviews.csv "$EXT/manifest.json" "$EXTERNAL_ROWS" <<'PY' 2>/dev/null || true
+import hashlib, json, sys
+from pathlib import Path
+data, csv, ext, rows = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4])
+out = []
+if data.is_file() and json.loads(data.read_text()).get("source_sha256") != hashlib.sha256(csv.read_bytes()).hexdigest():
+    out.append("data")
+if rows and ext.is_file() and json.loads(ext.read_text()).get("rows") != rows:
+    out.append("ext")
+print(" ".join(out))
+PY
+)
+  if [[ $stale == *data* ]]; then
+    log "data/reviews.csv changed: rebuilding the data; the teacher labels only the new reviews"
+    rm -f runs/.done_data runs/.done_teacher
+  fi
+  if [[ $stale == *ext* ]]; then
+    log "outside sample size changed to $EXTERNAL_ROWS: topping it up; the teacher labels only the new rows"
+    rm -f runs/.done_ext_data runs/.done_ext_teacher
+  fi
+}
+
+pick() {
+  .venv/bin/python -m doonview_ml.pick --report "runs/report$SUFFIX/metrics.json" --runs runs --tag "$RUN_TAG" \
+    --out "runs/selection$SUFFIX.json"
+}
+
+chosen() {  # chosen <field>: from the automatic selection if this run made one, else the configured backbone
+  if [[ -f "runs/selection$SUFFIX.json" ]]; then
+    .venv/bin/python -c "import json, sys; print(json.load(open(sys.argv[1]))['best'][sys.argv[2]])" \
+      "runs/selection$SUFFIX.json" "$1"
+  elif [[ $1 == backbone ]]; then echo "$FINAL_BACKBONE"
+  fi
+}
+
 lr_for() {  # xsmall's model card fine-tunes at 4.5e-5; larger DeBERTa-v3 sizes at 2e-5
   [[ $1 == *xsmall* ]] && echo 4.5e-5 || echo 2e-5
 }
@@ -212,11 +297,12 @@ lr_for() {  # xsmall's model card fine-tunes at 4.5e-5; larger DeBERTa-v3 sizes 
 cv() {
   for backbone in $BACKBONES; do
     for seed in $SEEDS; do
-      local out="runs/cv-${backbone##*/}-s$seed"
+      local out="runs/cv-$PREFIX${backbone##*/}-s$seed"
       if [[ -f $out/cv.json ]]; then echo "skip $out (done)"; continue; fi
-      echo "== cross-validation: $backbone seed $seed"
+      echo "== cross-validation: $backbone seed $seed${RUN_TAG:+ ($RUN_TAG)}"
+      # shellcheck disable=SC2046  # ext_args is empty or two flag pairs without spaces in them
       .venv/bin/python -m doonview_ml.train cv --backbone "$backbone" --data "$DATA" --teacher "$(teacher_labels)" \
-        --epochs "$EPOCHS" --lr "$(lr_for "$backbone")" --seed "$seed" --out "$out"
+        --epochs "$EPOCHS" --lr "$(lr_for "$backbone")" --seed "$seed" --out "$out" $(ext_args)
     done
   done
 }
@@ -233,21 +319,24 @@ PY
   fi
   [[ -f runs/current-model/labels.json ]] && compare=(--compare-model runs/current-model)
   MODEL_THREADS=8 .venv/bin/python -m doonview_ml.evaluate --data "$DATA" --teacher "$(teacher_labels)" \
-    --cv runs/cv-*/ "${compare[@]}" --out runs/report
+    --cv runs/cv-"$PREFIX"deberta-*/ "${compare[@]}" --out "runs/report$SUFFIX"   # this run's data only
 }
 
-final_name() { echo "final-${FINAL_BACKBONE##*/}"; }
+final_name() { local b; b=$(chosen backbone); echo "final-$PREFIX${b##*/}"; }
+model_name() { local b; b=$(chosen backbone); echo "doon-view-$PREFIX${b##*/}"; }
 
 final() {
-  local seed=${SEEDS%% *} epochs
-  epochs=$(.venv/bin/python -c "import json; print(json.load(open('runs/cv-${FINAL_BACKBONE##*/}-s$seed/cv.json'))['best_epochs'])")
-  echo "final model: $FINAL_BACKBONE, all reviews, $epochs epochs (chosen by cross-validation)"
-  .venv/bin/python -m doonview_ml.train final --backbone "$FINAL_BACKBONE" --data "$DATA" --teacher "$(teacher_labels)" \
-    --epochs "$epochs" --lr "$(lr_for "$FINAL_BACKBONE")" --seed "$seed" --out "runs/$(final_name)"
+  local backbone seed epochs
+  backbone=$(chosen backbone); seed=$(chosen seed); seed=${seed:-${SEEDS%% *}}
+  epochs=$(.venv/bin/python -c "import json; print(json.load(open('runs/cv-$PREFIX${backbone##*/}-s$seed/cv.json'))['best_epochs'])")
+  echo "final model: $backbone, all reviews${RUN_TAG:+ ($RUN_TAG)}, $epochs epochs (chosen by cross-validation)"
+  # shellcheck disable=SC2046
+  .venv/bin/python -m doonview_ml.train final --backbone "$backbone" --data "$DATA" --teacher "$(teacher_labels)" \
+    --epochs "$epochs" --lr "$(lr_for "$backbone")" --seed "$seed" --out "runs/$(final_name)" $(ext_args)
 }
 
 export_() {
-  local name; name="doon-view-${FINAL_BACKBONE##*/}"
+  local name; name=$(model_name)
   .venv/bin/python -m doonview_ml.export --run "runs/$(final_name)" --out "artifacts/$name" --data "$DATA/reviews.parquet"
   .venv/bin/python - "artifacts/$name" <<'PY'
 import sys, zipfile
@@ -260,17 +349,18 @@ PY
 }
 
 backup() {
-  local name; name="doon-view-${FINAL_BACKBONE##*/}"
+  local name results; name=$(model_name); results="runs/doon-view-results$SUFFIX.tgz"
   shopt -s nullglob
-  local parts=(runs/report runs/cv-*/cv.json runs/logs "$DATA/manifest.json" "$DATA"/teacher/*.jsonl \
-               artifacts/*/parity.json runs/pip-freeze.txt runs/torch-pin.txt)
-  tar czf runs/doon-view-results.tgz "${parts[@]}"
-  echo "results bundle: runs/doon-view-results.tgz (review IDs and labels only, no review text)"
+  local parts=("runs/report$SUFFIX" runs/cv-*/cv.json runs/logs "$DATA/manifest.json" "$DATA"/teacher/*.jsonl \
+               "$EXT/manifest.json" "$EXT"/teacher/*.jsonl artifacts/*/parity.json runs/pip-freeze.txt runs/torch-pin.txt)
+  local existing=(); for p in "${parts[@]}"; do [[ -e $p ]] && existing+=("$p"); done
+  tar czf "$results" "${existing[@]}"
+  echo "results bundle: $results (review IDs and labels only, no review text)"
   if [[ -z "${HF_TOKEN:-}" ]]; then
-    warn "NOT BACKED UP (no HF_TOKEN). Copy artifacts/$name.zip and runs/doon-view-results.tgz off this machine now."
+    warn "NOT BACKED UP (no HF_TOKEN). Copy artifacts/$name.zip and $results off this machine now."
     return 0
   fi
-  .venv/bin/python - "artifacts/$name.zip" runs/doon-view-results.tgz "$HF_REPO" <<'PY'
+  .venv/bin/python - "artifacts/$name.zip" "$results" "$HF_REPO" <<'PY'
 import os, sys
 from huggingface_hub import HfApi
 api = HfApi(token=os.environ["HF_TOKEN"])
@@ -286,16 +376,32 @@ PY
 }
 
 # ── run ──────────────────────────────────────────────────────────────────
-log "run started $(date -u '+%F %T UTC') | teacher $TEACHER_MODEL | backbones: $BACKBONES | seeds: $SEEDS"
+log "run started $(date -u '+%F %T UTC') | teacher $TEACHER_MODEL | backbones: $BACKBONES | seeds: $SEEDS${RUN_TAG:+ | run $RUN_TAG: +$EXTERNAL_ROWS outside reviews, Mussoorie x$MUSSOORIE_REPEAT}"
 stage setup setup
+refresh_inputs
 stage test test_
 stage data data
 stage teacher teacher
+stage ext_data ext_data
+stage ext_teacher ext_teacher
 stage cv cv
 stage evaluate evaluate
+stage pick pick
 stage final final
 stage export export_
 stage backup backup
 log "FINISHED $(date -u '+%F %T UTC'). RESULT:"
-cat runs/report/report.md 2>/dev/null || true
+cat "runs/report$SUFFIX/report.md" 2>/dev/null || true
+if [[ -f "runs/selection$SUFFIX.json" ]]; then
+  .venv/bin/python - "runs/selection$SUFFIX.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+print("\n## Automatic selection:", s["rule"])
+for c in s["candidates"]:
+    print(f"  {c['run']}: score {c['score']:.3f} (sentiment {c['sentiment_f1']:.3f}, complaints {c['complaint_f1']:.3f})")
+if s.get("current"):
+    print(f"  current model: sentiment {s['current']['sentiment_f1']:.3f}, complaints {s['current']['complaint_f1']:.3f}")
+print("VERDICT:", s["verdict"], "|", s["caveat"])
+PY
+fi
 echo "Paste the RESULT table to Claude. Ctrl+C to stop watching."

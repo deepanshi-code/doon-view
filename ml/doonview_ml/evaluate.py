@@ -47,7 +47,7 @@ def sentiment_report(gold: np.ndarray, pred: np.ndarray, seed: int = 0) -> dict:
 
 def aspect_report(df: pd.DataFrame, pred_aspects: dict[str, list[str]], teacher: dict) -> dict:
     """pred_aspects: aspect -> per-review value. Agreement with the teacher, and polarity vs the guest's sub-rating."""
-    out = {"vs_teacher": {}, "negative_recall_vs_teacher": {}, "vs_subratings": {}}
+    out = {"vs_teacher": {}, "negative_recall_vs_teacher": {}, "negative_f1_vs_teacher": {}, "vs_subratings": {}}
     for a, preds in pred_aspects.items():
         gold = [teacher.get(r, {}).get("aspects", {}).get(a, "not_mentioned") if r in teacher else None
                 for r in df["review_id"]]
@@ -57,6 +57,9 @@ def aspect_report(df: pd.DataFrame, pred_aspects: dict[str, list[str]], teacher:
             out["vs_teacher"][a] = float(f1_score(g, p, labels=list(ASPECT_VALUES), average="macro", zero_division=0))
             neg = [pp == "negative" for gg, pp in pairs if gg == "negative"]
             out["negative_recall_vs_teacher"][a] = {"recall": float(np.mean(neg)) if neg else None, "support": len(neg)}
+            # recall alone rewards flagging everything; F1 of the complaint class also counts false alarms
+            out["negative_f1_vs_teacher"][a] = (float(f1_score(g, p, labels=["negative"], average="macro",
+                                                               zero_division=0)) if neg else None)
         col = f"sub_{a}"
         if col in df:
             pol = df[col].map(rating_to_polarity)
@@ -147,6 +150,25 @@ def main() -> None:
                      f"{teacher_txt} | {sub_txt} |")
     lines += ["", "Aspects vs teacher is agreement with the LLM that labelled the training data, not accuracy. "
               "The sub-rating column is independent: the guest's own 1-5 rating for that aspect."]
+    # Every ahead/behind verdict in the app counts complaints, so this table decides which model ships
+    support = next((r["aspects"]["negative_recall_vs_teacher"] for r in rows.values() if r.get("aspects")), {})
+    if support:
+        lines += ["", "## Complaints caught per aspect (share of the teacher's negative labels the model also finds)", "",
+                  "| Candidate | " + " | ".join(f"{a} (n={s['support']})" for a, s in support.items()) + " |",
+                  "|---|" + "---|" * len(support)]
+        for name, r in rows.items():
+            recall = (r.get("aspects") or {}).get("negative_recall_vs_teacher")
+            if recall:
+                cells = [f"{recall[a]['recall']:.2f}" if recall.get(a, {}).get("recall") is not None else "-"
+                         for a in support]
+                lines.append(f"| {name} | " + " | ".join(cells) + " |")
+        lines += ["", "## Complaint F1 per aspect (counts false alarms too: the score used to pick a model)", "",
+                  "| Candidate | " + " | ".join(support) + " |", "|---|" + "---|" * len(support)]
+        for name, r in rows.items():
+            f1s = (r.get("aspects") or {}).get("negative_f1_vs_teacher")
+            if f1s:
+                lines.append(f"| {name} | " + " | ".join(f"{f1s[a]:.2f}" if f1s.get(a) is not None else "-"
+                                                        for a in support) + " |")
     (args.out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
 
