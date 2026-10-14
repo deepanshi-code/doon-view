@@ -8,7 +8,10 @@ Usage
 Inputs
     data/raw/google_all_properties_20261013.json
     data/raw/makemytrip_all_properties_20261013.json
-    data/raw/tripadvisor_all_properties_20261013.json
+    data/raw/tripadvisor_all_properties_20261013.json   (hotel-level scores)
+    data/raw/tripadvisor_reviews_*.json                  (review-actor output, optional, any number of files)
+    data/raw/booking_reviews_*.json                      (Booking.com reviews actor output, optional)
+    data/raw/agoda_reviews_*.json                        (Agoda reviews actor output, optional)
     data/current/hotels.csv      (maintained by hand: one row per hotel, platform IDs, in_cluster)
 
 Outputs (data/current/)
@@ -20,6 +23,7 @@ Design rules (lessons from v1):
     * Deduplicate only true duplicates (same platform, hotel, date, rating, text).
 """
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -33,7 +37,16 @@ RAW_FILES = {
     "makemytrip": "makemytrip_all_properties_20261013.json",
     "tripadvisor": "tripadvisor_all_properties_20261013.json",
 }
+TRIPADVISOR_REVIEW_GLOB = "tripadvisor_reviews_*.json"   # one or more review-actor outputs
+BOOKING_REVIEW_GLOB = "booking_reviews_*.json"           # Booking.com reviews actor (piotrv1001/booking-reviews-scraper)
+AGODA_REVIEW_GLOB = "agoda_reviews_*.json"               # Agoda reviews actor (blackfalcondata/agoda-reviews-scraper)
 SCRAPED_AT = "2026-10-13"
+
+# Listings that were scraped but turned out to be a different property. Their reviews are skipped (and logged),
+# so the raw files can stay unedited.
+IGNORED_LISTINGS = {
+    ("agoda", "56389887"): "PerfectStayz Mall Road Mussoorie - a different Perfectstayz property (photo check, 13 Oct 2026)",
+}
 
 # Reviews flagged by hand after reading them, keyed by platform review ID.
 MANUAL_FLAGS = {
@@ -43,9 +56,10 @@ MANUAL_FLAGS = {
 COLUMNS = [
     "review_id", "hotel_id", "canonical_name", "platform", "review_origin", "platform_review_id",
     "platform_property_id", "platform_property_name", "rating_raw", "rating_scale", "rating_5",
-    "review_date", "date_precision", "stay_month", "title", "text", "has_text", "language",
+    "review_date", "date_precision", "stay_month", "stay_nights", "stay_status", "title", "text",
+    "text_positive", "text_negative", "has_text", "language",
     "hindi_marker_count", "travel_group", "trip_purpose", "room_name", "owner_reply", "owner_reply_date",
-    "reviewer_hash", "reviewer_id_type", "reviewer_review_count", "reviewer_is_local_guide",
+    "reviewer_hash", "reviewer_id_type", "reviewer_country", "reviewer_review_count", "reviewer_is_local_guide",
     "helpful_count", "image_count", "original_language_platform", "text_translated_platform",
     "platform_context_json", "cross_post_group", "text_hash", "source_url", "scraped_at",
     "quality_flag", "review_edited_likely",
@@ -116,7 +130,11 @@ def detect_language(text):
     distinct = len(set(hits))
     if deva:
         return "hinglish", distinct
-    if distinct >= 3 or (distinct >= 2 and len(hits) / max(len(tokens), 1) >= 0.10):
+    ratio = len(hits) / max(len(tokens), 1)
+    # Long English reviews sometimes quote a Hindi phrase ("they said light aati jaati rehti hai");
+    # these stay "en" (see hindi_marker_count), so a minimum share of Hindi words is required.
+    # Very short reviews ("Bahut shandar", "Mast hotel hai") rarely reach 2 distinct markers.
+    if (distinct >= 3 and ratio >= 0.05) or (distinct >= 2 and ratio >= 0.10) or (len(tokens) <= 5 and distinct >= 1 and ratio >= 0.3):
         return "hinglish", distinct
     if latin == 0:
         return "other", distinct
@@ -124,7 +142,11 @@ def detect_language(text):
 
 
 TRAVEL_GROUP = {"Family": "family", "Couple": "couple", "Friends": "friends_group", "Solo": "solo",
-                "FAMILY": "family", "COUPLE": "couple", "GROUP": "friends_group", "SOLO": "solo"}
+                "FAMILY": "family", "COUPLE": "couple", "GROUP": "friends_group", "SOLO": "solo",
+                "COUPLES": "couple", "FRIENDS": "friends_group",
+                "FAMILIES": "family", "SOLO_TRAVELLERS": "solo", "GROUP_OF_FRIENDS": "friends_group",
+                "Family with young children": "family", "Family with teens": "family", "Group": "friends_group",
+                "Solo traveler": "solo"}
 
 
 def to_int(v):
@@ -140,7 +162,8 @@ def load_hotels(path):
     lookup = {}
     for _, r in h.iterrows():
         for platform, col in [("google", "google_place_id"), ("makemytrip", "makemytrip_hotel_id"),
-                              ("tripadvisor", "tripadvisor_id")]:
+                              ("tripadvisor", "tripadvisor_id"), ("booking", "booking_id"),
+                              ("agoda", "agoda_id")]:
             if r[col]:
                 key = (platform, r[col])
                 if key in lookup:
@@ -239,6 +262,173 @@ def parse_makemytrip(path, lookup):
     return reviews
 
 
+def parse_tripadvisor_reviews(paths, lookup):
+    reviews, subs, seen = [], [], set()
+    translated = 0
+    for path in paths:
+        items = json.load(open(path, encoding="utf-8"))
+        for x in items:
+            if not isinstance(x, dict) or "locationId" not in x or "text" not in x:
+                sys.exit(f"{path}: item without locationId/text - is this the TripAdvisor REVIEWS actor output?")
+            if x["id"] in seen:
+                continue                                   # same review in two run files
+            seen.add(x["id"])
+            loc = str(x["locationId"])
+            if ("tripadvisor", loc) not in lookup:
+                sys.exit(f"TripAdvisor location {loc} ({(x.get('placeInfo') or {}).get('name')}) is not in hotels.csv")
+            rating = float(x["rating"]) if x.get("rating") not in (None, "") else None
+            user = x.get("user") or {}
+            reply = x.get("ownerResponse") or {}
+            if reply and not isinstance(reply, dict):
+                sys.exit(f"Unexpected ownerResponse format: {str(reply)[:80]}")
+            tt = x.get("tripType")
+            machine = bool(x.get("isMachineTranslated"))
+            translated += machine
+            rid = f"rev_ta_{x['id']}"                      # TripAdvisor review IDs are stable, so use them directly
+            reviews.append(dict(
+                review_id=rid, hotel_id=lookup[("tripadvisor", loc)], platform="tripadvisor",
+                review_origin="tripadvisor", platform_review_id=x["id"], platform_property_id=loc,
+                platform_property_name=(x.get("placeInfo") or {}).get("name"),
+                rating_raw=rating, rating_scale=5, rating_5=rating,
+                review_date=x.get("publishedDate"), date_precision="exact" if x.get("publishedDate") else "missing",
+                stay_month=x.get("travelDate"), title=x.get("title") or None,
+                # If the actor returned a machine translation, the original text is not available.
+                text=None if machine else mask(x.get("text")),
+                travel_group=TRAVEL_GROUP.get(tt, "unknown"),
+                trip_purpose="business" if tt == "BUSINESS" else ("leisure" if tt else "unknown"),
+                room_name=None,
+                owner_reply=mask(reply.get("text")),
+                owner_reply_date=(reply.get("publishedDate") or "")[:10] or None,
+                reviewer_hash=reviewer_hash(user.get("userId")),
+                reviewer_id_type="platform_id" if user.get("userId") else "none",
+                reviewer_review_count=to_int((user.get("contributions") or {}).get("totalContributions")),
+                reviewer_is_local_guide=None,
+                helpful_count=to_int(x.get("helpfulVotes")), image_count=len(x.get("photos") or []),
+                original_language_platform=x.get("originalLanguage"),
+                text_translated_platform=mask(x.get("text")) if machine else None,
+                platform_context_json=None, source_url=x.get("url"), scraped_at=SCRAPED_AT,
+            ))
+            for sr in x.get("subratings") or []:
+                if sr.get("value") is not None:
+                    subs.append(dict(review_id=rid, platform_category=str(sr["name"]).lower().replace(" ", "_"),
+                                     score=float(sr["value"])))
+    log(f"TripAdvisor reviews: {len(paths)} file(s), {len(reviews)} reviews, {len(subs)} sub-ratings, "
+        f"{translated} machine-translated (original text missing)")
+    return reviews, subs
+
+
+def parse_booking(paths, lookup):
+    """Booking.com: score out of 10, separate liked / disliked text, stay dates, stay status, no reviewer ID."""
+    reviews, seen = [], set()
+    for path in paths:
+        for x in json.load(open(path, encoding="utf-8")):
+            if not isinstance(x, dict) or "hotelId" not in x or "score" not in x:
+                sys.exit(f"{path}: item without hotelId/score - is this the Booking.com REVIEWS actor output?")
+            if x["reviewId"] in seen:
+                continue
+            seen.add(x["reviewId"])
+            hid = str(x["hotelId"])
+            if ("booking", hid) not in lookup:
+                sys.exit(f"Booking hotel {hid} ({x.get('hotelName')}) is not in hotels.csv (column booking_id)")
+            score = float(x["score"]) if x.get("score") not in (None, "") else None
+            liked = mask((x.get("liked") or "").strip()) or None
+            disliked = mask((x.get("disliked") or "").strip()) or None
+            # Combined text keeps the guest's own split visible to downstream models.
+            parts = [f"Liked: {liked}" if liked else None, f"Disliked: {disliked}" if disliked else None]
+            text = "\n".join(p for p in parts if p) or None
+            lang = x.get("language")
+            reviews.append(dict(
+                review_id=f"rev_bk_{x['reviewId']}", hotel_id=lookup[("booking", hid)], platform="booking",
+                review_origin="booking", platform_review_id=x["reviewId"], platform_property_id=hid,
+                platform_property_name=x.get("hotelName"),
+                # Booking scores run 1-10; map linearly onto 1-5 (1 -> 1, 10 -> 5) so rating_5 shares one range.
+                rating_raw=score, rating_scale=10, rating_5=round(1 + (score - 1) * 4 / 9, 3) if score is not None else None,
+                review_date=(x.get("reviewedAt") or "")[:10] or None,
+                date_precision="exact" if x.get("reviewedAt") else "missing",
+                stay_month=(x.get("stayCheckin") or "")[:7] or None, stay_nights=to_int(x.get("nights")),
+                stay_status=x.get("stayStatus"), title=(x.get("title") or "").strip() or None,
+                text=text, text_positive=liked, text_negative=disliked,
+                travel_group=TRAVEL_GROUP.get(x.get("travellerType"), "unknown"), trip_purpose="unknown",
+                room_name=x.get("roomType"),
+                owner_reply=mask(x.get("hotelReply")) if isinstance(x.get("hotelReply"), str) else None,
+                owner_reply_date=None,
+                reviewer_hash=None, reviewer_id_type="none", reviewer_country=x.get("reviewerCountry"),
+                reviewer_review_count=None, reviewer_is_local_guide=None,
+                helpful_count=to_int(x.get("helpfulVotes")), image_count=None,
+                original_language_platform=None if lang in (None, "xu") else lang,   # "xu" = undetermined
+                text_translated_platform=None, platform_context_json=None,
+                source_url=x.get("hotelUrl"), scraped_at=SCRAPED_AT,
+            ))
+    log(f"Booking.com: {len(paths)} file(s), {len(reviews)} reviews, "
+        f"{sum(r['text'] is None for r in reviews)} score-only, "
+        f"{sum(r['stay_status'] != 'stayed' for r in reviews)} by guests who did not stay")
+    return reviews
+
+
+def local_date(ts, fmt="%Y-%m-%d"):
+    """Agoda timestamps carry +07:00; convert to India time before taking the date."""
+    if not ts:
+        return None
+    return pd.Timestamp(ts).tz_convert("Asia/Kolkata").strftime(fmt)
+
+
+def parse_agoda(paths, lookup):
+    """Agoda: score out of 10, optional positives/negatives, stay dates. Only Agoda-native reviews are kept;
+    Agoda also shows Booking.com / Priceline reviews, which would duplicate other sources."""
+    reviews, seen, other_source, translated, ignored = [], set(), 0, 0, {}
+    for path in paths:
+        for x in json.load(open(path, encoding="utf-8")):
+            if not isinstance(x, dict) or "hotelId" not in x or "rating" not in x:
+                sys.exit(f"{path}: item without hotelId/rating - is this the Agoda REVIEWS actor output?")
+            if (x.get("provider") or "").lower() != "agoda":
+                other_source += 1
+                continue
+            if x["reviewId"] in seen:
+                continue
+            seen.add(x["reviewId"])
+            hid = str(x["hotelId"])
+            if ("agoda", hid) in IGNORED_LISTINGS:
+                ignored[hid] = ignored.get(hid, 0) + 1
+                continue
+            if ("agoda", hid) not in lookup:
+                sys.exit(f"Agoda hotel {hid} ({x.get('hotelName')}) is not in hotels.csv (column agoda_id)")
+            score = float(x["rating"]) if x.get("rating") not in (None, "") else None
+            rv = x.get("reviewer") or {}
+            src_lang = x.get("translatedFrom")
+            # `text` is shown in the site language; if it was translated and no original is given, keep it
+            # only as a translation.
+            machine = bool(src_lang) and src_lang != (x.get("translatedTo") or "en") and not x.get("originalText")
+            translated += machine
+            body = (x.get("originalText") or x.get("text") or "").strip()
+            group = rv.get("travelerGroup")
+            reviews.append(dict(
+                review_id=f"rev_ag_{x['reviewId']}", hotel_id=lookup[("agoda", hid)], platform="agoda",
+                review_origin="agoda", platform_review_id=x["reviewId"], platform_property_id=hid,
+                platform_property_name=x.get("hotelName"),
+                rating_raw=score, rating_scale=10, rating_5=round(1 + (score - 1) * 4 / 9, 3) if score is not None else None,
+                review_date=local_date(x.get("reviewDate")), date_precision="exact" if x.get("reviewDate") else "missing",
+                stay_month=local_date(x.get("checkInDate"), "%Y-%m"), stay_nights=to_int(rv.get("lengthOfStay")),
+                stay_status=None, title=((x.get("originalTitle") or x.get("title") or "").strip() or None),
+                text=None if machine else (mask(body) or None),
+                text_positive=mask((x.get("positives") or "").strip()) or None,
+                text_negative=mask((x.get("negatives") or "").strip()) or None,
+                travel_group=TRAVEL_GROUP.get(group, "unknown"),
+                trip_purpose="business" if group == "Business traveler" else "unknown",
+                room_name=rv.get("roomType"),
+                owner_reply=mask(x.get("responseText")), owner_reply_date=local_date(x.get("responseDate")),
+                reviewer_hash=None, reviewer_id_type="none", reviewer_country=rv.get("country"),
+                reviewer_review_count=to_int(rv.get("reviewedCount")), reviewer_is_local_guide=None,
+                helpful_count=to_int(x.get("helpfulVotes")), image_count=len(x.get("images") or []),
+                original_language_platform=src_lang, text_translated_platform=mask(body) if machine else None,
+                platform_context_json=None, source_url=x.get("hotelUrl"), scraped_at=(x.get("scrapedAt") or SCRAPED_AT)[:10],
+            ))
+    log(f"Agoda: {len(paths)} file(s), {len(reviews)} Agoda-native reviews, {other_source} from other sources skipped, "
+        f"{translated} machine-translated (original text missing)")
+    for hid, n in ignored.items():
+        log(f"  skipped {n} reviews from ignored listing agoda {hid}: {IGNORED_LISTINGS[('agoda', hid)]}")
+    return reviews
+
+
 def parse_tripadvisor_scores(path, hotels):
     items = json.load(open(path, encoding="utf-8"))
     review_like = sum(1 for t in items if t.get("reviews"))
@@ -282,8 +472,17 @@ def main():
     g_rev, subs = parse_google(os.path.join(args.raw, RAW_FILES["google"]), lookup)
     m_rev = parse_makemytrip(os.path.join(args.raw, RAW_FILES["makemytrip"]), lookup)
     ta = parse_tripadvisor_scores(os.path.join(args.raw, RAW_FILES["tripadvisor"]), hotels)
+    ta_paths = sorted(glob.glob(os.path.join(args.raw, TRIPADVISOR_REVIEW_GLOB)))
+    t_rev, t_subs = parse_tripadvisor_reviews(ta_paths, lookup) if ta_paths else ([], [])
+    subs = subs + t_subs
 
-    df = pd.DataFrame(g_rev + m_rev)
+    bk_paths = sorted(glob.glob(os.path.join(args.raw, BOOKING_REVIEW_GLOB)))
+    b_rev = parse_booking(bk_paths, lookup) if bk_paths else []
+
+    ag_paths = sorted(glob.glob(os.path.join(args.raw, AGODA_REVIEW_GLOB)))
+    a_rev = parse_agoda(ag_paths, lookup) if ag_paths else []
+
+    df = pd.DataFrame(g_rev + m_rev + t_rev + b_rev + a_rev)
     df["canonical_name"] = df.hotel_id.map(hotels.set_index("hotel_id").canonical_name)
 
     # language and text flags
@@ -292,6 +491,16 @@ def main():
     df["hindi_marker_count"] = [b for _, b in lang]
     df["text_hash"] = df.text.apply(text_hash)
     df["has_text"] = df.text.fillna("").str.strip().ne("")
+    # The tagger only knows en / hi / hinglish. Trust the platform when it reports another language
+    # (e.g. a French TripAdvisor review), for texts long enough for its detection to be reliable.
+    # Platforms sometimes mislabel English (a TripAdvisor "fr" review reads "Best experience value for money"),
+    # so only override when few words are common English ones.
+    EN_COMMON = set("the and is was very good for with in of to a we it hotel room rooms staff best nice value "
+                    "money great stay experience service food location clean".split())
+    en_share = df.text.fillna("").str.lower().apply(lambda t: (lambda w: sum(x in EN_COMMON for x in w) / max(len(w), 1))(TOKEN.findall(t)))
+    other = (~df.original_language_platform.isin(["en", "hi", "en-Deva"]) & df.original_language_platform.notna()
+             & (df.language == "en") & (df.text.fillna("").str.len() >= 20) & (en_share < 0.2))
+    df.loc[other, "language"] = "other"
 
     df["quality_flag"] = df.platform_review_id.map(MANUAL_FLAGS)
     junk = df.has_text & (df.text.fillna("").str.strip().str.len() <= 3)      # "3", "5", "Wo"
@@ -306,6 +515,17 @@ def main():
         log(f"  duplicate removed: {r.review_id} ({r.platform}, {r.canonical_name}, {r.review_date})")
     df = df[~dup].copy()
     log(f"Dedup: {before} -> {len(df)}")
+
+    # Google shows some TripAdvisor reviews (review_origin = tripadvisor). If we also scraped TripAdvisor
+    # directly, keep the native record (more fields). Match on hotel + first 60 letters/digits: Google joins
+    # TripAdvisor paragraphs with "|" and may truncate, so punctuation and spacing are ignored.
+    norm = df.text.fillna("").str.lower().str.replace(r"[^a-z0-9]", "", regex=True).str[:60]
+    native = set(zip(df.hotel_id[df.platform == "tripadvisor"], norm[df.platform == "tripadvisor"]))
+    syn = (df.platform == "google") & (df.review_origin == "tripadvisor") & (norm.str.len() >= 12)
+    copy = syn & pd.Series([(h, t) in native for h, t in zip(df.hotel_id, norm)], index=df.index)
+    for _, r in df[copy].iterrows():
+        log(f"  Google copy of a scraped TripAdvisor review removed: {r.review_id}")
+    df = df[~copy].copy()
 
     # cross-posts: same guest text at the same hotel on two platforms (kept, flagged)
     sub = df[df.text.fillna("").str.len() >= 30]
@@ -331,7 +551,8 @@ def main():
     subs = subs[subs.review_id.isin(df.review_id)].merge(df[["review_id", "hotel_id"]], on="review_id")
     subs = subs[["review_id", "hotel_id", "platform_category", "score"]]
 
-    df = df.sort_values(["platform", "review_id"])[COLUMNS]
+    df = df.reindex(columns=COLUMNS)                 # platforms without a field get an empty column
+    df = df.sort_values(["platform", "review_id"])
     os.makedirs(args.current, exist_ok=True)
     df.to_csv(os.path.join(args.current, "reviews.csv"), index=False)
     subs.to_csv(os.path.join(args.current, "sub_ratings.csv"), index=False)
