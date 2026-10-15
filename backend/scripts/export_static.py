@@ -3,6 +3,9 @@
     python -m scripts.export_static --out ../frontend/public/data
     (then build the frontend with VITE_STATIC_DATA=1)
 
+The output is committed: Cloudflare builds the site from git and can't run this (the cluster file is private).
+Rerun it and commit the result whenever the cluster is rebuilt.
+
 The responses come from the API's own route functions, so a static file holds exactly what /api would return for
 the same request: aggregates and short quotes, never a cluster file's full review list. The frontend offers two
 periods (format.js PERIODS), so each destination is written for both: since 2025-01 and all time.

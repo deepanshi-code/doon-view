@@ -18,5 +18,5 @@ data/*.zip
 data/dataset final/
 data/v1/
 !data/reviews.template.csv
-# Static API responses for the API-free build (backend/scripts/export_static.py)
-frontend/public/data/
+# frontend/public/data/ IS tracked: the static API responses Cloudflare's build serves (aggregates and short quotes
+# only, what /api published). The cluster files they come from stay out (backend/clusters/ above).
