@@ -165,7 +165,8 @@ def main() -> None:
     p.add_argument("--kind", default="hotels")
     p.add_argument("--source", default="")
     p.add_argument("--min-reviews", type=int, default=15, help="drop properties with fewer reviews than this")
-    p.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL)
+    p.add_argument("--model-dir", type=Path, default=None,
+                   help="model to label with; wins over MODEL_DIR in the environment or .env (default: backend/model)")
     p.add_argument("--out", type=Path, default=BACKEND / "clusters")
     p.add_argument("--check", action="store_true", help="report on the data and stop: no labelling, nothing written")
     p.add_argument("--demo", action="store_true", help="synthetic data (scripts/make_demo_data.py): every view says so")
@@ -203,11 +204,18 @@ def main() -> None:
     rows = [r for r in rows if r["property"] in kept]
     print(f"{len(rows)} reviews, {len(kept)} properties (dropped {dropped} with < {args.min_reviews} reviews)")
 
-    os.environ.setdefault("MODEL_DIR", str(args.model_dir))
+    # An explicit --model-dir wins over MODEL_DIR from the environment or backend/.env (loaded by `import app`):
+    # setdefault here once let a stale MODEL_DIR="model-base" in .env label a whole market with the wrong model.
+    if args.model_dir is not None:
+        os.environ["MODEL_DIR"] = str(args.model_dir)
+    os.environ.setdefault("MODEL_DIR", str(DEFAULT_MODEL))
     from app import labelling
-    if labelling.load_classifier() is None:
+    classifier = labelling.load_classifier()
+    if classifier is None:
         print("WARNING: no fine-tuned model loaded: labels come from Gemini (if configured) or keyword rules",
               file=sys.stderr)
+    else:
+        print(f"labelling with model '{classifier.name}' from {os.environ['MODEL_DIR']}")
 
     out_reviews = []
     batch = 64
@@ -230,6 +238,7 @@ def main() -> None:
         args.source = "Synthetic demo data: generated reviews of fictional properties (scripts/make_demo_data.py)."
     cluster = {"slug": args.slug, "name": args.name, "kind": args.kind, "source": args.source, "demo": args.demo,
                "built": datetime.now().strftime("%Y-%m-%d"), "label_sources": dict(sources),
+               "labelled_by": classifier.name if classifier is not None else None,
                "properties": {slugify(n): n for n in sorted(kept)}, "reviews": out_reviews}
     args.out.mkdir(parents=True, exist_ok=True)
     path = args.out / f"{args.slug}.json"

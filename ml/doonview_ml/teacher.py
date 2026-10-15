@@ -21,6 +21,25 @@ import requests
 from .labels import ASPECTS, CLASSIFICATION_SCHEMA, build_prompt, parse_classification
 
 
+# Guide v2: the v1 teacher seemed to drop brief complaints inside mostly positive reviews ("rooms are old",
+# "overpriced", "lift not working"), and models trained on it missed complaints the guests rated 1-2 themselves.
+# Measured, not assumed: evaluate.py grades both teachers against the guests' sub-ratings.
+GUIDES = {
+    "v1": "",
+    "v2": ("- Complaints count even when brief, listed, or inside a mostly positive review: 'rooms are old', "
+           "'overpriced', 'lift not working', 'far from Mall Road' are each a negative for that aspect. A fault "
+           "with the room or its equipment is a negative amenities label; a price the guest finds too high for "
+           "what they got is a negative value label. Do not mark an aspect negative unless the review says or "
+           "clearly implies a problem with it.\n\n"),
+}
+EXTRA_RULES = ""   # set by main() from --guide; read by both teacher backends
+
+
+def label_suffix(guide: str) -> str:
+    """v1 keeps the original file name, so earlier runs and their resumable labels are untouched."""
+    return "" if guide == "v1" else f"-{guide}"
+
+
 def to_json_schema(node: dict) -> dict:
     """Gemini-style schema (type: "OBJECT") -> standard JSON Schema for OpenAI-compatible servers."""
     out = {k: v for k, v in node.items() if k not in ("type", "properties")}
@@ -40,7 +59,7 @@ class OpenAICompatibleTeacher:
 
     def label(self, text: str) -> dict:
         body = {"model": self.model, "temperature": 0,
-                "messages": [{"role": "user", "content": build_prompt(text)}],
+                "messages": [{"role": "user", "content": build_prompt(text, EXTRA_RULES)}],
                 "response_format": {"type": "json_schema", "json_schema": {"name": "classification", "schema": self.schema}},
                 "chat_template_kwargs": {"enable_thinking": False}}  # Qwen3: no reasoning trace
         res = requests.post(self.url, json=body, timeout=180)
@@ -63,7 +82,7 @@ class HFTeacher:
         self.hint = json.dumps(to_json_schema(CLASSIFICATION_SCHEMA))
 
     def _prompt(self, text: str) -> str:
-        content = build_prompt(text) + f"\n\nReply with ONLY a JSON object matching this JSON Schema:\n{self.hint}"
+        content = build_prompt(text, EXTRA_RULES) + f"\n\nReply with ONLY a JSON object matching this JSON Schema:\n{self.hint}"
         return self.tok.apply_chat_template([{"role": "user", "content": content}], tokenize=False,
                                             add_generation_prompt=True, enable_thinking=False)
 
@@ -159,13 +178,17 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=32)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--limit", type=int, help="label only this many (spot checks)")
+    p.add_argument("--guide", choices=sorted(GUIDES), default="v1",
+                   help="v2 adds a rule on brief complaints; its labels go to <model>-v2.jsonl, v1's stay untouched")
     args = p.parse_args()
+    global EXTRA_RULES
+    EXTRA_RULES = GUIDES[args.guide]
     teacher = (OpenAICompatibleTeacher(args.base_url, args.model) if args.backend == "openai"
                else HFTeacher(args.model, args.batch_size))
     rows = pd.read_parquet(args.data / "reviews.parquet")
     if args.limit:
         rows = rows.sample(min(args.limit, len(rows)), random_state=13)
-    out = args.data / "teacher" / f"{args.model.split('/')[-1]}.jsonl"
+    out = args.data / "teacher" / f"{args.model.split('/')[-1]}{label_suffix(args.guide)}.jsonl"
     ok, failed = run(teacher, rows, out, args.workers)
     print(f"done: {ok} labelled, {failed} failed")
 

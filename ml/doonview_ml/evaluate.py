@@ -12,7 +12,9 @@ Candidates:
 
 Sentiment is scored against the guests' stars, with a 95% bootstrap interval: with ~190 negative and ~90 neutral
 reviews, differences under a few points are noise. Aspects are scored against the teacher (agreement, not accuracy)
-and, for rooms, staff and location, against the guests' own Google sub-ratings (independent of every model).
+and against the guests' own Google and TripAdvisor sub-ratings (independent of every model): polarity accuracy, and
+the complaints caught among aspects the guest rated 1-2. The teacher itself is graded the same way, and
+--extra-model scores earlier int8 exports next to their out-of-fold fp32 predictions.
 """
 import argparse
 import json
@@ -69,8 +71,25 @@ def aspect_report(df: pd.DataFrame, pred_aspects: dict[str, list[str]], teacher:
             if judged:
                 out["vs_subratings"][a] = {"polarity_accuracy": float(np.mean([w == g for w, g in judged])),
                                            "n": len(judged)}
+    out["complaints_vs_guests"] = guest_complaints(df, pred_aspects)
     scores = list(out["vs_teacher"].values())
     out["vs_teacher_mean"] = float(np.mean(scores)) if scores else None
+    return out
+
+
+def guest_complaints(df: pd.DataFrame, pred_aspects: dict[str, list]) -> dict:
+    """Against the guest's own sub-rating for the aspect. catch: share of reviews rated 1-2 that the model labels a
+    complaint; false_alarm: share of reviews rated 5 that it still labels a complaint. Unlike polarity accuracy,
+    this counts a complaint the model calls not_mentioned as missed, the failure that hid the base model's weakness."""
+    out = {}
+    for a, preds in pred_aspects.items():
+        col = f"sub_{a}"
+        if col not in df:
+            continue
+        low = [p == "negative" for s, p in zip(df[col], preds) if s == s and s <= 2 and p is not None]
+        top = [p == "negative" for s, p in zip(df[col], preds) if s == s and s == 5 and p is not None]
+        out[a] = {"low_rated": len(low), "catch": float(np.mean(low)) if low else None,
+                  "top_rated": len(top), "false_alarm": float(np.mean(top)) if top else None}
     return out
 
 
@@ -104,6 +123,7 @@ def main() -> None:
     p.add_argument("--teacher", type=Path, required=True)
     p.add_argument("--cv", type=Path, nargs="*", default=[], help="cv run directories (oof.npz + cv.json)")
     p.add_argument("--compare-model", type=Path, help="exported model dir of the current app model")
+    p.add_argument("--extra-model", type=Path, nargs="*", default=[], help="other exported model dirs to score")
     p.add_argument("--out", type=Path, default=Path("runs/report"))
     args = p.parse_args()
     df = pd.read_parquet(args.data / "reviews.parquet")
@@ -115,7 +135,12 @@ def main() -> None:
     rows["tf-idf"] = {"sentiment": sentiment_report(gold, tfidf_oof(df))}
     labelled = df["review_id"].isin(teacher).to_numpy()
     t_sent = np.array([teacher[r]["sentiment"] for r in df.loc[labelled, "review_id"]])
+    # The teacher's own aspects, graded against the guests: if it misses complaints, every model trained on it will
+    t_asp = {a: [teacher[r].get("aspects", {}).get(a, "not_mentioned")
+                 if r in teacher and a in teacher[r].get("judged", ASPECTS) else None
+                 for r in df["review_id"]] for a in ASPECTS}
     rows[f"teacher ({args.teacher.stem})"] = {"sentiment": sentiment_report(gold[labelled], t_sent),
+                                              "aspects": {"complaints_vs_guests": guest_complaints(df, t_asp)},
                                               "note": f"{int(labelled.sum())} of {len(df)} reviews labelled"}
     for run in args.cv:
         oof = np.load(run / "oof.npz", allow_pickle=True)
@@ -134,6 +159,11 @@ def main() -> None:
         rows[f"current model ({name})"] = {"sentiment": sentiment_report(gold, sent),
                                            "aspects": aspect_report(df, asp, teacher),
                                            "note": "trained on other hotels' reviews; never saw these"}
+    for model_dir in args.extra_model:   # e.g. an earlier int8 export, next to its own out-of-fold fp32 predictions
+        sent, asp, name = current_model(df, model_dir)
+        rows[f"int8 export ({name})"] = {"sentiment": sentiment_report(gold, sent),
+                                         "aspects": aspect_report(df, asp, teacher),
+                                         "note": "trained on all of these reviews: in-sample, so flattered"}
 
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "metrics.json").write_text(json.dumps(rows, indent=2))
@@ -151,7 +181,8 @@ def main() -> None:
     lines += ["", "Aspects vs teacher is agreement with the LLM that labelled the training data, not accuracy. "
               "The sub-rating column is independent: the guest's own 1-5 rating for that aspect."]
     # Every ahead/behind verdict in the app counts complaints, so this table decides which model ships
-    support = next((r["aspects"]["negative_recall_vs_teacher"] for r in rows.values() if r.get("aspects")), {})
+    support = next((r["aspects"]["negative_recall_vs_teacher"] for r in rows.values()
+                    if (r.get("aspects") or {}).get("negative_recall_vs_teacher")), {})
     if support:
         lines += ["", "## Complaints caught per aspect (share of the teacher's negative labels the model also finds)", "",
                   "| Candidate | " + " | ".join(f"{a} (n={s['support']})" for a, s in support.items()) + " |",
@@ -169,6 +200,19 @@ def main() -> None:
             if f1s:
                 lines.append(f"| {name} | " + " | ".join(f"{f1s[a]:.2f}" if f1s.get(a) is not None else "-"
                                                         for a in support) + " |")
+    guest = {name: r["aspects"]["complaints_vs_guests"] for name, r in rows.items()
+             if (r.get("aspects") or {}).get("complaints_vs_guests")}
+    if guest:
+        judged = next(iter(guest.values()))
+        lines += ["", "## Complaints the guests rated themselves (independent of every model and the teacher)", "",
+                  "catch = share of reviews whose guest rated the aspect 1-2 that are labelled a complaint; "
+                  "false alarm = share rated 5 that still are. Proxies: compare rows, not absolute numbers.", "",
+                  "| Candidate | " + " | ".join(f"{a} (n={g['low_rated']}/{g['top_rated']})" for a, g in judged.items()) + " |",
+                  "|---|" + "---|" * len(judged)]
+        for name, g in guest.items():
+            cells = [f"{g[a]['catch']:.2f} / {g[a]['false_alarm']:.3f}" if g.get(a, {}).get("catch") is not None
+                     and g[a].get("false_alarm") is not None else "-" for a in judged]
+            lines.append(f"| {name} | " + " | ".join(cells) + " |")
     (args.out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
 

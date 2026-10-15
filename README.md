@@ -76,11 +76,19 @@ beats the current model on both sentiment and complaint F1.
 mkdir -p /workspace/doonview && cd /workspace/doonview && python3 -m zipfile -e doon-view-train.zip .
 export HF_TOKEN=<write token>   # optional: current-model comparison and private backup
 bash ml/train_b200.sh           # Mussoorie only; ml/train_mix_b200.sh and ml/train_auto_b200.sh add outside data
+bash ml/train_improve_b200.sh   # relabels with guide v2 and diagnoses the last run against guests' own ratings
 ```
 
-The result is a model zip under `ml/artifacts/`, which the app loads through `MODEL_DIR` or `MODEL_URL`. Before
-switching the app to a new model, rebuild the cluster with it and compare the labels on real reviews: an int8 export
-is only checked against its full-precision model on sentiment, not on aspects.
+The result is a model zip under `ml/artifacts/`, which the app loads through `MODEL_DIR` or `MODEL_URL`. Models are
+also graded against the guests' own Google and TripAdvisor sub-ratings, which no model or labelling LLM has seen: a
+candidate that catches fewer of the complaints guests rated 1-2 than the app's model is never picked, and the int8
+export must keep 90% of its full-precision complaints on every aspect. Before switching the app, rebuild the cluster
+with the new model and run the same check on every review:
+
+```bash
+cd ml && python -m doonview_ml.subrating --data ../data --current ../backend/clusters/mussoorie.json \
+    --candidate <new cluster>/mussoorie.json     # exit code 1: keep the current model
+```
 
 ## Tests
 

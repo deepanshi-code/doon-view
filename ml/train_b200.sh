@@ -44,8 +44,13 @@ EXTERNAL_ROWS="${EXTERNAL_ROWS:-0}"      # > 0: that many outside reviews in eve
 MUSSOORIE_REPEAT="${MUSSOORIE_REPEAT:-3}"  # with outside reviews: times each Mussoorie review is trained on
 LAUNCHER="${LAUNCHER:-train_b200.sh}"
 AUTO_SELECT="${AUTO_SELECT:-0}"          # 1: the best backbone by a fixed rule (doonview_ml.pick) is the one shipped
+TEACHER_GUIDE="${TEACHER_GUIDE:-v1}"     # v2: teacher.py's extra rule on brief complaints; labels in <model>-v2.jsonl
+DIAGNOSE="${DIAGNOSE:-0}"                # 1: before labelling, grade the last run's teacher and models against guests
+DIAGNOSE_TAG="${DIAGNOSE_TAG:-auto}"     # the earlier run to diagnose (its cv-<tag>-* and artifacts)
+GSUF=""; [[ $TEACHER_GUIDE != v1 ]] && GSUF="-$TEACHER_GUIDE"
 default_stages="setup test data teacher"
 (( EXTERNAL_ROWS > 0 )) && default_stages+=" ext_data ext_teacher"
+(( DIAGNOSE == 1 )) && default_stages+=" diagnose"   # after labelling: it grades the v1 labels against the guests
 default_stages+=" cv evaluate"
 (( AUTO_SELECT == 1 )) && default_stages+=" pick"
 STAGES="${STAGES:-$default_stages final export backup}"
@@ -71,6 +76,12 @@ if [[ -z "${TRAIN_INSIDE:-}" ]]; then
   if [[ -f $PIDFILE ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     echo "already running (pid $(cat "$PIDFILE"))."; follow_log
   fi
+  # Any other run in this folder, whatever its launcher or tag: two at once fight over the GPU and the stage markers
+  for other in runs/train*.pid; do
+    if [[ -f $other && $other != "$PIDFILE" ]] && kill -0 "$(cat "$other")" 2>/dev/null; then
+      die "another run is active in this folder (pid $(cat "$other"), $other). Let it finish, or stop it first: kill $(cat "$other")"
+    fi
+  done
   say "preflight"
   [[ -f ../backend/app/labelling.py ]] || die "backend/ must sit next to ml/: extract the whole zip into one empty folder"
   [[ -f ../data/reviews.csv ]] || die "data/reviews.csv is missing: it must sit next to ml/ (data/reviews.csv)"
@@ -95,7 +106,8 @@ if [[ -z "${TRAIN_INSIDE:-}" ]]; then
   fi
   [[ -n "${HF_TOKEN:-}" ]] || warn "HF_TOKEN not set: no comparison with the current model and no backup."
   echo "preflight OK: $(nvidia-smi -L | head -1 | cut -c1-70) | ${free_gb} GB free | $(python3 -V)"
-  : > "$LOG"
+  # Append, never truncate: a replay or resume must not erase an earlier run's backup lines and verdict
+  printf '\n\n======== %s: %s (STAGES=%s) ========\n' "$(date -u '+%F %T UTC')" "$LAUNCHER" "${STAGES:-default}" >> "$LOG"
   if command -v setsid >/dev/null; then
     TRAIN_INSIDE=1 setsid nohup bash "$(pwd)/train_b200.sh" >>"$LOG" 2>&1 </dev/null &
   else
@@ -121,6 +133,7 @@ stage() {  # stage <name> <function>: run unless done; only mark done if it real
   local name=$1 fn=$2 key=$1
   want "$name" || return 0
   case $name in cv|evaluate|pick|final|export|backup) key="$name$SUFFIX" ;; esac  # per run tag; the rest is shared
+  case $name in teacher|ext_teacher) key="$name$GSUF" ;; esac                    # per labelling guide
   if [[ -f "runs/.done_$key" ]]; then log "skip $name (done; rm runs/.done_$key to redo)"; return; fi
   log "stage: $name"
   set +e
@@ -182,8 +195,19 @@ data() {
   .venv/bin/python -m doonview_ml.data --reviews ../data/reviews.csv --sub-ratings ../data/sub_ratings.csv --out "$DATA"
 }
 
-serve_and_label() {  # serve_and_label <model> [data dir]: vLLM server, label everything, stop it; 1 if it can't serve
-  local model=$1 dir=${2:-$DATA} pid ready=0
+data_guides() {  # the Mussoorie reviews get TEACHER_GUIDE, plus v1 when diagnosing (3,124 reviews: a few minutes),
+  echo "$TEACHER_GUIDE"   # so a fresh machine can still compare the old guide with the new one against the guests
+  if (( DIAGNOSE == 1 )) && [[ $TEACHER_GUIDE != v1 ]]; then echo v1; fi
+}
+
+serve_and_label() {  # serve_and_label <model> [data dir] [guide...]: one vLLM server, label with each guide, stop it
+  local model=$1 dir=${2:-$DATA} pid ready=0 guide
+  local guides=("${@:3}"); (( ${#guides[@]} )) || guides=("$TEACHER_GUIDE")
+  if curl -sf "http://localhost:$TEACHER_PORT/health" >/dev/null; then   # a server left running blocks the GPU
+    echo "something already serves on port $TEACHER_PORT (a vLLM left from another run?). Not starting a second one."
+    echo "Find it: ps -eo pid,etime,cmd | grep -E 'vllm|EngineCore' | grep -v grep   then stop it and run this again."
+    return 2
+  fi
   .venv-teacher/bin/vllm serve "$model" --port "$TEACHER_PORT" --max-model-len 4096 --gpu-memory-utilization 0.85 \
     > "runs/logs/vllm-${model##*/}.log" 2>&1 &
   pid=$!
@@ -198,26 +222,45 @@ serve_and_label() {  # serve_and_label <model> [data dir]: vLLM server, label ev
     return 1
   fi
   local rc=0
-  .venv/bin/python -m doonview_ml.teacher --backend openai --model "$model" \
-    --base-url "http://localhost:$TEACHER_PORT/v1" --data "$dir" --workers 32 || rc=$?
+  for guide in "${guides[@]}"; do
+    echo "labelling $dir with guide $guide"
+    .venv/bin/python -m doonview_ml.teacher --backend openai --model "$model" --guide "$guide" \
+      --base-url "http://localhost:$TEACHER_PORT/v1" --data "$dir" --workers 32 || { rc=$?; break; }
+  done
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true   # free the GPU for training
   return $rc
 }
 
+gpu_gb() {  # memory of the GPU this run sees; on a MIG slice that is the slice (nvidia-smi can report the whole card)
+  .venv/bin/python -c "import torch; print(int(torch.cuda.get_device_properties(0).total_memory / 2**30))" 2>/dev/null || echo 0
+}
+
 teacher() {
-  local used=""
+  local used="" guide guides gb
+  mapfile -t guides < <(data_guides)
+  gb=$(gpu_gb)
+  if (( gb > 0 && gb < 40 )) && [[ $TEACHER_MODEL == *30B* ]]; then
+    echo "this GPU has ${gb} GB: $TEACHER_MODEL (~31 GB of weights) can't load; using $TEACHER_FALLBACK"
+    TEACHER_MODEL=$TEACHER_FALLBACK   # same teacher for both guides and the outside reviews, so labels stay comparable
+  fi
   if [[ -f runs/vllm_ok ]]; then
-    if serve_and_label "$TEACHER_MODEL"; then used=$TEACHER_MODEL
-    elif serve_and_label "$TEACHER_FALLBACK"; then used=$TEACHER_FALLBACK
+    local rc=0
+    serve_and_label "$TEACHER_MODEL" "$DATA" "${guides[@]}" || rc=$?
+    if (( rc == 2 )); then return 1; fi   # another server holds the GPU: stop here (resumable), don't fall back
+    if (( rc == 0 )); then used=$TEACHER_MODEL
+    elif serve_and_label "$TEACHER_FALLBACK" "$DATA" "${guides[@]}"; then used=$TEACHER_FALLBACK
     fi
   fi
   if [[ -z $used ]]; then
-    .venv/bin/python -m doonview_ml.teacher --backend hf --model "$TEACHER_FALLBACK" --data "$DATA" --batch-size 16
+    for guide in "${guides[@]}"; do
+      .venv/bin/python -m doonview_ml.teacher --backend hf --model "$TEACHER_FALLBACK" --guide "$guide" \
+        --data "$DATA" --batch-size 16
+    done
     used=$TEACHER_FALLBACK
   fi
   echo "${used##*/}" > runs/teacher-name
   echo "$used" > runs/teacher-model
-  local labels="$DATA/teacher/${used##*/}.jsonl"
+  local labels="$DATA/teacher/${used##*/}$GSUF.jsonl"
   echo "teacher $used: $(wc -l < "$labels") labels"
   .venv/bin/python - "$labels" <<'PY'
 import json, sys, itertools
@@ -226,7 +269,7 @@ for line in itertools.islice(open(sys.argv[1], encoding="utf-8"), 5):  # spot ch
 PY
 }
 
-teacher_labels() { echo "$DATA/teacher/$(cat runs/teacher-name).jsonl"; }
+teacher_labels() { echo "$DATA/teacher/$(cat runs/teacher-name)$GSUF.jsonl"; }
 
 teacher_model() {  # the full id of the model that labelled the Mussoorie reviews (older runs saved only its name)
   if [[ -f runs/teacher-model ]]; then cat runs/teacher-model; return; fi
@@ -244,9 +287,9 @@ ext_teacher() {  # one teacher for both sets, or the mixed labels would disagree
   if [[ -f runs/vllm_ok ]]; then
     serve_and_label "$model" "$EXT" || { echo "vLLM could not serve $model: not mixing teachers, stopping"; return 1; }
   else
-    .venv/bin/python -m doonview_ml.teacher --backend hf --model "$model" --data "$EXT" --batch-size 16
+    .venv/bin/python -m doonview_ml.teacher --backend hf --model "$model" --guide "$TEACHER_GUIDE" --data "$EXT" --batch-size 16
   fi
-  local labels="$EXT/teacher/${model##*/}.jsonl" rows
+  local labels="$EXT/teacher/${model##*/}$GSUF.jsonl" rows
   rows=$(.venv/bin/python -c "import pandas as pd; print(len(pd.read_parquet('$EXT/reviews.parquet')))")
   echo "outside reviews: $(wc -l < "$labels") of $rows labelled"
 }
@@ -264,12 +307,17 @@ if data.is_file() and json.loads(data.read_text()).get("source_sha256") != hashl
     out.append("data")
 if rows and ext.is_file() and json.loads(ext.read_text()).get("rows") != rows:
     out.append("ext")
+parquet = data.parent / "reviews.parquet"
+if parquet.is_file() and "data" not in out:   # built before the TripAdvisor value/cleanliness sub-ratings were read
+    import pyarrow.parquet as pq
+    if "sub_value" not in pq.read_schema(parquet).names:
+        out.append("data")
 print(" ".join(out))
 PY
 )
   if [[ $stale == *data* ]]; then
-    log "data/reviews.csv changed: rebuilding the data; the teacher labels only the new reviews"
-    rm -f runs/.done_data runs/.done_teacher
+    log "data/reviews.csv or the sub-ratings it reads changed: rebuilding the data; the teacher labels only new reviews"
+    rm -f runs/.done_data runs/.done_teacher runs/.done_teacher-* runs/.done_diagnose
   fi
   if [[ $stale == *ext* ]]; then
     log "outside sample size changed to $EXTERNAL_ROWS: topping it up; the teacher labels only the new rows"
@@ -307,8 +355,7 @@ cv() {
   done
 }
 
-evaluate() {
-  local compare=()
+fetch_current() {  # the app's model, to compare against (needs HF_TOKEN once; kept in runs/current-model)
   if [[ -n "${HF_TOKEN:-}" && ! -f runs/current-model/labels.json ]]; then
     .venv/bin/python - "$COMPARE_REPO" "$COMPARE_FILE" runs/current-model <<'PY' || echo "could not download the current model: comparison skipped"
 import sys, zipfile
@@ -317,6 +364,33 @@ zipfile.ZipFile(hf_hub_download(sys.argv[1], sys.argv[2], repo_type="model")).ex
 print(f"current model {sys.argv[2]} -> {sys.argv[3]}")
 PY
   fi
+}
+
+diagnose() {  # why did the last run's model miss complaints? Everything graded against the guests' own sub-ratings
+  local v1 cvs=() extra=() compare=() d
+  [[ -f runs/teacher-name ]] || { echo "no teacher has labelled the reviews yet: nothing to diagnose"; return 0; }
+  v1="$DATA/teacher/$(cat runs/teacher-name).jsonl"
+  [[ -f $v1 ]] || { echo "no v1 teacher labels at $v1: nothing to diagnose"; return 0; }
+  # On a fresh machine there are no earlier cv runs or exports: the teacher and the app's model are still graded
+  for d in runs/cv-"$DIAGNOSE_TAG"-deberta-*/; do if [[ -f $d/oof.npz ]]; then cvs+=("$d"); fi; done
+  for d in artifacts/doon-view-"$DIAGNOSE_TAG"-deberta-*/; do if [[ -f $d/model.int8.onnx ]]; then extra+=("$d"); fi; done
+  fetch_current
+  if [[ -f runs/current-model/labels.json ]]; then compare=(--compare-model runs/current-model); fi
+  MODEL_THREADS=8 .venv/bin/python -m doonview_ml.evaluate --data "$DATA" --teacher "$v1" --cv "${cvs[@]}" \
+    "${compare[@]}" --extra-model "${extra[@]}" --out runs/report-diagnose \
+    || { echo "diagnosis could not run (see above); it only informs, so the run continues"; return 0; }
+  cat <<'TXT'
+
+How to read the guest table above (catch / false alarm per aspect):
+  teacher row low            -> the training labels miss complaints: the v2 guide is the fix (this run relabels)
+  cv row fine, int8 row low  -> compression lost them: export.py now refuses such an int8 model
+  current model row highest  -> the bar a new model must clear before it ships
+TXT
+}
+
+evaluate() {
+  local compare=()
+  fetch_current
   [[ -f runs/current-model/labels.json ]] && compare=(--compare-model runs/current-model)
   MODEL_THREADS=8 .venv/bin/python -m doonview_ml.evaluate --data "$DATA" --teacher "$(teacher_labels)" \
     --cv runs/cv-"$PREFIX"deberta-*/ "${compare[@]}" --out "runs/report$SUFFIX"   # this run's data only
@@ -384,6 +458,7 @@ stage data data
 stage teacher teacher
 stage ext_data ext_data
 stage ext_teacher ext_teacher
+stage diagnose diagnose
 stage cv cv
 stage evaluate evaluate
 stage pick pick
@@ -398,7 +473,8 @@ import json, sys
 s = json.load(open(sys.argv[1]))
 print("\n## Automatic selection:", s["rule"])
 for c in s["candidates"]:
-    print(f"  {c['run']}: score {c['score']:.3f} (sentiment {c['sentiment_f1']:.3f}, complaints {c['complaint_f1']:.3f})")
+    print(f"  {c['run']}: score {c['score']:.3f} (sentiment {c['sentiment_f1']:.3f}, complaints {c['complaint_f1']:.3f})"
+          + (" | misses guest-rated complaints: " + "; ".join(c["guest_problems"]) if c.get("guest_problems") else ""))
 if s.get("current"):
     print(f"  current model: sentiment {s['current']['sentiment_f1']:.3f}, complaints {s['current']['complaint_f1']:.3f}")
 print("VERDICT:", s["verdict"], "|", s["caveat"])

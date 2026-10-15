@@ -8,8 +8,10 @@ Score = (sentiment macro-F1 + mean complaint F1 over the aspects the current mod
 F1 of the "negative" class per aspect against the teacher: every ahead/behind verdict in the app counts complaints,
 and F1 punishes both missed complaints and false alarms.
 
-Ships only if it beats the current model on BOTH sentiment and mean complaint F1; otherwise the current model stays
-and the report says why. One seed per candidate, so differences of ~0.01 are noise: stated in the output.
+Ships only if it beats the current model on BOTH sentiment and mean complaint F1, AND catches as many complaints as the
+current model where guests rated an aspect 1-2 themselves (Google/TripAdvisor sub-ratings, which no model or teacher
+has seen); otherwise the current model stays and the report says why. The teacher-based score alone once picked a
+model that copied a cautious teacher and missed real complaints. One seed per candidate, so differences of ~0.01 are noise: stated in the output.
 """
 import argparse
 import json
@@ -24,6 +26,31 @@ def complaint_f1(row: dict, aspects: list[str]) -> float | None:
     return float(np.mean(vals)) if vals else None
 
 
+GUEST_MIN_LOW_RATED = 30     # aspects with fewer guest 1-2 ratings are reported, not judged
+GUEST_CATCH_TOLERANCE = 0.05  # a candidate may catch at most 5 points fewer guest-rated complaints
+GUEST_ALARM_TOLERANCE = 0.02  # and raise at most 2 points more false alarms on aspects the guest rated 5
+
+
+def guest_problems(new: dict | None, cur: dict | None) -> list[str]:
+    """Where a candidate misses complaints the guests rated 1-2 (or flags ones they rated 5) clearly more than the
+    current model. Empty when either side lacks guest data, so older reports are judged as before."""
+    if not new or not cur:
+        return []
+    out = []
+    for a, c in cur.items():
+        n = new.get(a) or {}
+        if c.get("low_rated", 0) >= GUEST_MIN_LOW_RATED and None not in (c.get("catch"), n.get("catch")) \
+                and n["catch"] < c["catch"] - GUEST_CATCH_TOLERANCE:
+            out.append(f"{a}: catches {n['catch']:.0%} of guest-rated complaints, current model {c['catch']:.0%}")
+        if None not in (c.get("false_alarm"), n.get("false_alarm")) and n["false_alarm"] > c["false_alarm"] + GUEST_ALARM_TOLERANCE:
+            out.append(f"{a}: false alarms {n['false_alarm']:.1%}, current model {c['false_alarm']:.1%}")
+    return out
+
+
+def _guests(row: dict | None) -> dict | None:
+    return ((row or {}).get("aspects") or {}).get("complaints_vs_guests")
+
+
 def choose(metrics: dict, prefix: str) -> dict:
     current = next((r for name, r in metrics.items() if name.startswith("current model")), None)
     candidates = {name: r for name, r in metrics.items() if name.startswith(f"cv cv-{prefix}")}
@@ -35,21 +62,27 @@ def choose(metrics: dict, prefix: str) -> dict:
     for name, r in candidates.items():
         c, s = complaint_f1(r, shared), r["sentiment"]["macro_f1"]
         scored.append({"run": name.removeprefix("cv "), "sentiment_f1": s, "complaint_f1": c,
-                       "score": (s + (c or 0)) / 2})
-    scored.sort(key=lambda x: -x["score"])
+                       "score": (s + (c or 0)) / 2, "guest_problems": guest_problems(_guests(r), _guests(current))})
+    # A candidate that misses complaints the guests themselves rated low ranks below every one that doesn't,
+    # whatever its score against the teacher (who may be the one missing them)
+    scored.sort(key=lambda x: (bool(x["guest_problems"]), -x["score"]))
     best = scored[0]
-    out = {"rule": "score = (sentiment F1 + mean complaint F1 on shared aspects) / 2", "aspects": shared,
-           "candidates": scored, "best": best}
+    out = {"rule": "score = (sentiment F1 + mean complaint F1 on shared aspects) / 2, after the guest sub-rating check",
+           "aspects": shared, "candidates": scored, "best": best}
     if current:
         cur = {"sentiment_f1": current["sentiment"]["macro_f1"], "complaint_f1": complaint_f1(current, shared)}
         out["current"] = cur
-        out["ships"] = bool(best["sentiment_f1"] > cur["sentiment_f1"] and best["complaint_f1"] is not None
-                            and best["complaint_f1"] > cur["complaint_f1"])
-        out["verdict"] = ("ship it: better than the current model on sentiment and complaints" if out["ships"] else
-                          "keep the current model: the best new one is not better on both sentiment and complaints")
+        better = bool(best["sentiment_f1"] > cur["sentiment_f1"] and best["complaint_f1"] is not None
+                      and best["complaint_f1"] > cur["complaint_f1"])
+        out["ships"] = better and not best["guest_problems"]
+        out["verdict"] = ("ship it: better than the current model on sentiment and complaints, and catches as many "
+                          "guest-rated complaints" if out["ships"] else
+                          "keep the current model: " + ("; ".join(best["guest_problems"]) if best["guest_problems"] else
+                                                        "the best new one is not better on both sentiment and complaints"))
     else:
         out["ships"], out["verdict"] = None, "no current model in the report: compare by hand before shipping"
-    out["caveat"] = "one seed per candidate: score differences under ~0.01 are within seed noise"
+    out["caveat"] = ("one seed per candidate: score differences under ~0.01 are within seed noise. Before switching "
+                     "the app, also run doonview_ml.subrating on the rebuilt cluster (the int8 model, all reviews)")
     return out
 
 

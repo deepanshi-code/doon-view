@@ -21,8 +21,9 @@ from app.labelling import (  # noqa: E402
 
 ASPECTS = tuple(ASPECT_GUIDE)  # cleanliness, location, wifi, host, value, amenities, food, booking
 
-# Google's per-review sub-ratings -> our aspect. An independent check on aspect polarity: the guest rated it.
-SUBRATING_ASPECT = {"rooms": "amenities", "service": "host", "location": "location"}
+# Google's and TripAdvisor's per-review sub-ratings -> our aspect. An independent check: the guest rated it.
+SUBRATING_ASPECT = {"rooms": "amenities", "service": "host", "location": "location", "value": "value",
+                    "cleanliness": "cleanliness"}
 
 
 def rating_to_sentiment(stars: float) -> str:

@@ -58,6 +58,24 @@ def test_subrating_check_ignores_reviews_without_a_subrating():
     assert report["vs_subratings"]["location"] == {"polarity_accuracy": 1.0, "n": 2}
 
 
+def test_guest_check_counts_not_mentioned_as_a_missed_complaint():
+    """The base model said not_mentioned for complaints; polarity accuracy never saw those, the guest check does."""
+    df = pd.DataFrame({"review_id": list("abcdef"), "sub_amenities": [1.0, 2.0, 1.0, 5.0, 5.0, np.nan]})
+    preds = ["negative", "not_mentioned", "not_mentioned", "positive", "negative", "negative"]
+    g = aspect_report(df, {"amenities": preds}, {})["complaints_vs_guests"]["amenities"]
+    assert g == {"low_rated": 3, "catch": 1 / 3, "top_rated": 2, "false_alarm": 0.5}
+
+
+def test_teacher_guides_keep_v1_untouched():
+    from doonview_ml import teacher
+    from doonview_ml.labels import build_prompt
+    assert teacher.label_suffix("v1") == "" and teacher.label_suffix("v2") == "-v2"
+    assert teacher.GUIDES["v1"] == ""
+    assert build_prompt("Room was fine.") == build_prompt("Room was fine.", "")   # the app's prompt is unchanged
+    v2 = build_prompt("Room was fine.", teacher.GUIDES["v2"])
+    assert "brief" in v2 and v2.index("brief") < v2.index("Room was fine.")       # the rule sits before the review
+
+
 def _raw_tripadvisor(n_per_star=200):
     rows, i = [], 0
     for stars in (1, 2, 3, 4, 5):

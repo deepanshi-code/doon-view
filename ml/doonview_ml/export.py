@@ -3,8 +3,8 @@
     python -m doonview_ml.export --run runs/final-deberta-v3-xsmall --out artifacts/doon-view-xsmall
 
 Writes model.onnx (fp32), model.int8.onnx, tokenizer.json, labels.json and parity.json. The fp32 export must match
-PyTorch; the int8 model must agree with PyTorch on >= 95% of sentiments (Mussoorie reviews plus fixed examples),
-trying the smallest recipe first. int8 weights are stored as uint8 (u8u8.py: lossless, and safe on CPUs without
+PyTorch; the int8 model must agree with PyTorch on >= 95% of sentiments AND keep >= 90% of PyTorch's complaints on
+every aspect with enough of them (parity.py; Mussoorie reviews plus fixed examples), trying the smallest recipe first. int8 weights are stored as uint8 (u8u8.py: lossless, and safe on CPUs without
 VNNI), and labels.json gets reference answers ("canary") that the app re-checks at start-up.
 """
 import argparse
@@ -18,6 +18,7 @@ import torch
 from onnxruntime.quantization import QuantType, quantize_dynamic
 
 from .model import MultiTaskModel
+from .parity import MIN_COMPLAINT_RECALL, complaint_recall, failing
 from .u8u8 import convert as to_u8u8
 
 PARITY_TEXTS = [
@@ -87,23 +88,28 @@ def export(run: Path, out: Path, data: Path | None, opset: int) -> dict:
 
     matmuls = [n.name for n in onnx.load(str(onnx_path)).graph.node if n.op_type == "MatMul"]
     ref_labels = [config["sentiments"][i] for i in ref[0].argmax(-1)]
+    ref_aspects = [{a: config["aspect_values"][v] for a, v in zip(config["aspects"], row)} for row in ref[2].argmax(-1)]
     for recipe, keep_fp32 in RECIPES:
         quantize_dynamic(str(onnx_path), str(int8_path), weight_type=QuantType.QInt8, per_channel=True,
                          nodes_to_exclude=[m for m in matmuls if keep_fp32(m)])
         to_u8u8(int8_path, int8_path)
         got = classifier(out).predict(texts)
         agree = float(np.mean([w == g["sentiment"] for w, g in zip(ref_labels, got)]))
-        attempt = {"recipe": recipe, "sentiment_agreement": agree, "size_mb": round(int8_path.stat().st_size / 1e6, 1)}
+        recalls = complaint_recall(ref_aspects, [g["aspects_all"] for g in got], config["aspects"])
+        weak = failing(recalls)
+        attempt = {"recipe": recipe, "sentiment_agreement": agree, "complaint_recall": recalls, "weak_aspects": weak,
+                   "size_mb": round(int8_path.stat().st_size / 1e6, 1)}
         report["int8_attempts"].append(attempt)
         print(json.dumps(attempt), flush=True)
-        if agree >= MIN_AGREEMENT:
-            report |= {"int8_recipe": recipe, "int8_sentiment_agreement": agree}
+        if agree >= MIN_AGREEMENT and not weak:
+            report |= {"int8_recipe": recipe, "int8_sentiment_agreement": agree, "int8_complaint_recall": recalls}
             break
     report["sizes_mb"] = {p.name: round(p.stat().st_size / 1e6, 1) for p in (onnx_path, int8_path)}
     (out / "parity.json").write_text(json.dumps(report, indent=2))
     if "int8_recipe" not in report:
         int8_path.unlink()  # never leave a failing int8 model where a deploy would pick it up
-        raise SystemExit(f"no int8 recipe reached {MIN_AGREEMENT:.0%} agreement: see {out / 'parity.json'}")
+        raise SystemExit(f"no int8 recipe kept {MIN_AGREEMENT:.0%} sentiment agreement and {MIN_COMPLAINT_RECALL:.0%} "
+                         f"of fp32 complaints per aspect: see {out / 'parity.json'}")
     add_canary(out)
     return report
 

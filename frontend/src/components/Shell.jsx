@@ -1,7 +1,24 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Link, NavLink, Outlet } from "react-router-dom"
 import { Moon, Sun } from "lucide-react"
+import { onSlow } from "../api"
 import Mark from "./Mark"
+
+/** Says why the page is still loading when the API host is waking from sleep. The live region is always
+ *  rendered, so screen readers announce the message when it appears. */
+function WakingNotice() {
+  const [waking, setWaking] = useState(false)
+  useEffect(() => onSlow(setWaking), [])
+  return (
+    <div role="status" className="mx-auto max-w-[1240px] flex justify-center">
+      {waking && (
+        <p data-waking className="glass mt-2 rounded-ctl px-4 py-2 text-sm text-ink">
+          Waking the server. The free host sleeps when idle, so the first load can take up to a minute.
+        </p>
+      )}
+    </div>
+  )
+}
 
 function ThemeToggle() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"))
@@ -41,6 +58,7 @@ export default function Shell() {
             <ThemeToggle />
           </nav>
         </div>
+        <WakingNotice />
       </header>
       <main id="main" className="flex-1 min-w-0 flex flex-col *:w-full"><Outlet /></main>
       <footer className="border-t border-line">

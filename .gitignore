@@ -18,3 +18,5 @@ data/*.zip
 data/dataset final/
 data/v1/
 !data/reviews.template.csv
+# Static API responses for the API-free build (backend/scripts/export_static.py)
+frontend/public/data/
